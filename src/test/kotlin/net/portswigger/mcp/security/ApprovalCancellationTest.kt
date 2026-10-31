@@ -39,7 +39,7 @@ class ApprovalCancellationTest {
             releaseEdt.countDown()
             SwingUtilities.invokeAndWait {}
         }
-        verify(exactly = 0) { Dialogs.showOptionDialog(any(), any(), any(), any(), any(), any()) }
+        verify(exactly = 0) { Dialogs.showOptionDialog(any(), any(), any(), any(), any(), any(), any()) }
     }
 
     @Test
@@ -49,8 +49,8 @@ class ApprovalCancellationTest {
         val shown = CompletableDeferred<Unit>()
         val releaseDialog = CountDownLatch(1)
         val dialog = mockk<JDialog>(relaxed = true)
-        every { Dialogs.showOptionDialog(any(), any(), any(), any(), any(), any()) } answers {
-            val onShow = arg<(JDialog) -> Boolean>(5)
+        every { Dialogs.showOptionDialog(any(), any(), any(), any(), any(), any(), any()) } answers {
+            val onShow = arg<(JDialog) -> Boolean>(6)
             check(onShow(dialog))
             shown.complete(Unit)
             check(releaseDialog.await(5, TimeUnit.SECONDS))
@@ -74,11 +74,11 @@ class ApprovalCancellationTest {
     }
 
     @Test
-    fun `active approval still allows and persists permission`() = runBlocking {
+    fun `active approval allows once without persisting permission`() = runBlocking {
         mockkObject(Dialogs)
         val config = mockk<McpConfig>(relaxed = true)
-        every { Dialogs.showOptionDialog(any(), any(), any(), any(), any(), any()) } returns 2
+        every { Dialogs.showOptionDialog(any(), any(), any(), any(), any(), any(), any()) } returns 0
         assertTrue(SwingUserApprovalHandler().requestApproval("example.com", 443, config, null, null))
-        verify(exactly = 1) { config.addAutoApproveTarget("example.com:443") }
+        verify(exactly = 0) { config.addAutoApproveTarget(any()) }
     }
 }

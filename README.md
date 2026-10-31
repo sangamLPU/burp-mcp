@@ -1,148 +1,148 @@
-# Burp Suite MCP Server Extension
+# Burp MCP Server
 
-## Overview
+**Live interception upgrade:** see [Live interception, OpenCode workflow and tool reference](docs/LIVE_INTERCEPTION.md). The existing endpoint remains `http://127.0.0.1:9876/mcp`. New live capture and edit permissions default to off. See [original tool inventory](docs/ORIGINAL_TOOLS.md) and [OpenCode configuration example](opencode.json.example).
 
-Integrate Burp Suite with AI Clients using the Model Context Protocol (MCP).
+The compatibility baseline and runtime fallbacks for Burp Suite Professional 2024.1 are documented in [Burp 2024.1 compatibility](docs/BURP_2024_1_COMPATIBILITY.md). The loaded extension's version and build ID are returned by `burp_get_status` and `burp_get_capabilities`; MCP initialization reports the same build identity.
 
-For more information about the protocol visit: [modelcontextprotocol.io](https://modelcontextprotocol.io/)
+For Codex MCP configuration, bearer-token recovery, and local request/interception verification, see [Codex connection and verification](docs/CODEX_SETUP.md).
 
-## Features
+The Burp tab's five-section layout, responsive controls, and UI verification notes are in [Burp MCP UI layout](docs/UI_LAYOUT.md).
 
-- Connect Burp Suite to AI clients through MCP
-- Automatic installation for Claude Desktop
-- Comes with packaged Stdio MCP proxy server
+A Burp Suite extension that exposes Burp traffic and approved testing actions as Model Context Protocol tools over Streamable HTTP. It builds on PortSwigger's official [Burp MCP Server](https://github.com/PortSwigger/mcp-server) and uses the official Montoya API and Kotlin MCP SDK.
 
-## Usage
-
-- Install the extension in Burp Suite
-- Configure your Burp MCP server in the extension settings
-- Configure your MCP client to use the Burp SSE MCP server or stdio proxy
-- Interact with Burp through your client!
-
-## Installation
-
-### Prerequisites
-
-Ensure that the following prerequisites are met before building and installing the extension:
-
-1. **Java**: Java must be installed and available in your system's PATH. You can verify this by running `java --version` in your terminal.
-2. **jar Command**: The `jar` command must be executable and available in your system's PATH. You can verify this by running `jar --version` in your terminal. This is required for building and installing the extension.
-
-### Building the Extension
-
-1. **Clone the Repository**: Obtain the source code for the MCP Server Extension.
-   ```
-   git clone https://github.com/PortSwigger/mcp-server.git
-   ```
-
-2. **Navigate to the Project Directory**: Move into the project's root directory.
-   ```
-   cd mcp-server
-   ```
-
-3. **Build the JAR File**: Use Gradle to build the extension.
-   ```
-   ./gradlew embedProxyJar
-   ```
-
-   This command compiles the source code and packages it into a JAR file located in `build/libs/burp-mcp-all.jar`.
-
-### Loading the Extension into Burp Suite
-
-1. **Open Burp Suite**: Launch your Burp Suite application.
-2. **Access the Extensions Tab**: Navigate to the `Extensions` tab.
-3. **Add the Extension**:
-    - Click on `Add`.
-    - Set `Extension Type` to `Java`.
-    - Click `Select file ...` and choose the JAR file built in the previous step.
-    - Click `Next` to load the extension.
-
-Upon successful loading, the MCP Server Extension will be active within Burp Suite.
-
-## Configuration
-
-### Configuring the Extension
-Configuration for the extension is done through the Burp Suite UI in the `MCP` tab.
-- **Toggle the MCP Server**: The `Enabled` checkbox controls whether the MCP server is active.
-- **Enable config editing**: The `Enable tools that can edit your config` checkbox allows the MCP server to expose tools which can edit Burp configuration files.
-- **Advanced options**: You can configure the port and host for the MCP server. By default, it listens on `http://127.0.0.1:9876`.
-
-### Claude Desktop Client
-
-To fully utilize the MCP Server Extension with Claude, you need to configure your Claude client settings appropriately.
-The extension has an installer which will automatically configure the client settings for you.
-
-1. Currently, Claude Desktop only support STDIO MCP Servers
-   for the service it needs.
-   This approach isn't ideal for desktop apps like Burp, so instead, Claude will start a proxy server that points to the
-   Burp instance,  
-   which hosts a web server at a known port (`localhost:9876`).
-
-2. **Configure Claude to use the Burp MCP server**  
-   You can do this in one of two ways:
-
-    - **Option 1: Run the installer from the extension**
-      This will add the Burp MCP server to the Claude Desktop config.
-
-    - **Option 2: Manually edit the config file**  
-      Open the file located at `~/Library/Application Support/Claude/claude_desktop_config.json`,
-      and replace or update it with the following:
-      ```json
-      {
-        "mcpServers": {
-          "burp": {
-            "command": "<path to Java executable packaged with Burp>",
-            "args": [
-                "-jar",
-                "/path/to/mcp/proxy/jar/mcp-proxy-all.jar",
-                "--sse-url",
-                "<your Burp MCP server URL configured in the extension>"
-            ]
-          }
-        }
-      }
-      ```
-
-3. **Restart Claude Desktop** - assuming Burp is running with the extension loaded.
-
-## Manual installations
-If you want to install the MCP server manually you can either use the extension's SSE server directly or the packaged
-Stdio proxy server.
-
-### SSE MCP Server
-To use the SSE server directly, provide the configured server URL to your MCP client:
-```
-http://127.0.0.1:9876
+```mermaid
+flowchart LR
+    C[Claude Code] -- model requests --> O[OmniRoute gateway] --> M[Selected model provider]
+    C -- Streamable HTTP MCP tools --> B[Burp MCP extension]
+    B --> A[Burp Montoya API]
+    A --> T[Burp traffic, scope, Repeater, Scanner]
 ```
 
-### Stdio MCP Proxy Server
-The source code for the proxy server can be found here: [MCP Proxy Server](https://github.com/PortSwigger/mcp-proxy)
+OmniRoute is the model gateway in this setup. Its own MCP server exposes OmniRoute management and routing tools; it does not aggregate arbitrary upstream MCP servers. The OmniRoute upstream MCP aggregation request remains closed as not planned, so Claude Code connects separately to the Burp endpoint while `omniroute launch` supplies Claude Code's model API. See the [OmniRoute Claude Code configuration](https://github.com/cheaper-inference/OmniRoute/wiki/Claude-Code-Configuration) and the [upstream aggregation issue](https://github.com/diegosouzapw/OmniRoute/issues/6364).
 
-In order to support MCP Clients which only support Stdio MCP Servers, the extension comes packaged with a proxy server for
-passing requests to the SSE MCP server extension.
+## Requirements
 
-If you want to use the Stdio proxy server you can use the extension's installer option to extract the proxy server jar.
-Once you have the jar you can add the following command and args to your client configuration:
-```
-/path/to/packaged/burp/java -jar /path/to/proxy/jar/mcp-proxy-all.jar --sse-url http://127.0.0.1:9876
-```
+- Burp Suite with Montoya extension support. Burp Community supports the traffic and analysis tools; Scanner and Collaborator remain Professional-only.
+- Java 17 or later to build. The extension bytecode targets Java 17.
+- Windows 10/11 and PowerShell 5.1+ for the scripts below.
+- For the model client: Node.js supported by your installed OmniRoute release, OmniRoute, and Claude Code CLI.
 
-If you modify the proxy source, rebuild and copy it into this project before packaging the extension:
-```bash
-# From mcp-proxy
-./gradlew shadowJar
-cp build/libs/mcp-proxy-all.jar /path/to/mcp-server/libs/mcp-proxy-all.jar
+## Build on Windows
 
-# From mcp-server
-./gradlew embedProxyJar
+From PowerShell in the repository directory:
+
+```powershell
+.\build.ps1
 ```
 
-### Creating / modifying tools
+The script runs the automated tests and packages the extension. The output is `build\libs\burp-mcp-all.jar`. To run the underlying Gradle tasks directly:
 
-Tools are defined in `src/main/kotlin/net/portswigger/mcp/tools/Tools.kt`. To define new tools, create a new serializable
-data class with the required parameters which will come from the LLM.
+```powershell
+.\gradlew.bat clean test shadowJar
+```
 
-The tool name is auto-derived from its parameters data class. A description is also needed for the LLM. You can return
-a string or a `List<ContentBlock>` to provide data back to the LLM.
+No IDE is required. The wrapper downloads the pinned Gradle distribution. The extension JAR is shaded and self-contained. It exposes Streamable HTTP for MCP clients; the outdated Java 21 SSE-to-stdio proxy is not included in this build.
 
-Extend the Paginated interface to add auto-pagination support.
+## Install and start the Burp extension
+
+1. Launch Burp Suite.
+2. Open **Extensions → Installed → Add**; select **Java**, then choose `build\libs\burp-mcp-all.jar`.
+3. Open the new **Burp MCP** suite tab. The server starts automatically by default; use the **Enabled** toggle to stop or restart it.
+4. Keep the default host `127.0.0.1` and port `9876`. The endpoint shown in the tab is `http://127.0.0.1:9876/mcp`.
+5. Copy the bearer token from **Server Configuration**. Authentication is enabled by default.
+6. In Burp, add the intended test hosts to **Target → Scope**. Add the same hosts to **Authorized HTTP Host Allowlist** in the extension tab. History and request tools only return or act on targets that pass both checks.
+
+The extension tab shows connection state, the endpoint, the registered Burp tool names, and the latest 100 payload-free MCP activity events. The MCP SDK does not expose connected client identity to this server.
+
+## Configure OmniRoute and Claude Code
+
+Install and start OmniRoute using its [official quick start](https://github.com/cheaper-inference/OmniRoute/blob/release/v3.8.53/docs/getting-started/QUICK-START.md). On Windows, the documented npm flow is:
+
+```powershell
+npm install -g omniroute
+omniroute
+```
+
+Open the dashboard at `http://localhost:20128`, connect a model provider, and confirm it is available. In a second PowerShell window, use Claude Code with OmniRoute as the model API:
+
+```powershell
+omniroute launch
+```
+
+For Claude Code to also discover Burp's MCP tools, copy `.mcp.json.example` to `.mcp.json` in the project where you run Claude Code, then provide the Burp token in the same PowerShell session before launching:
+
+```powershell
+Copy-Item .mcp.json.example .mcp.json
+$env:BURP_MCP_TOKEN = Read-Host "Paste the Burp MCP bearer token"
+omniroute launch
+```
+
+The example uses `${BURP_MCP_TOKEN}` for Claude Code's supported environment expansion. Keep the token out of Git and unset it when finished:
+
+```powershell
+Remove-Item Env:BURP_MCP_TOKEN
+```
+
+Alternatively, add the endpoint to Claude Code's local user configuration with its supported HTTP MCP command (the header is saved in Claude Code's local config):
+
+```powershell
+$env:BURP_MCP_TOKEN = Read-Host "Paste the Burp MCP bearer token"
+claude mcp add --transport http burp-mcp http://127.0.0.1:9876/mcp --header "Authorization: Bearer $env:BURP_MCP_TOKEN"
+Remove-Item Env:BURP_MCP_TOKEN
+```
+
+Then start the model-routed client with `omniroute launch`. Check the MCP connection with:
+
+```powershell
+claude mcp get burp-mcp
+claude mcp list
+```
+
+Inside Claude Code, `/mcp` shows connected servers. Ask it to call `burp_get_capabilities` or `burp_get_status`; those tools do not make network requests. The `.mcp.json.example` template uses the regular Claude Code HTTP MCP fields `type`, `url`, and `headers`.
+
+## Harmless local request check
+
+1. Start the local test server in one PowerShell window:
+
+   ```powershell
+   .\scripts\local-test-server.ps1
+   ```
+
+   It listens only on `127.0.0.1:8000`. Stop it with Ctrl+C.
+
+2. In Burp's **Target → Scope**, add `http://127.0.0.1:8000`. Add `127.0.0.1:8000` to the Burp MCP authorized-host allowlist.
+3. In **Burp MCP**, turn off **Read-only mode** for this request only. Keep **Require bearer token** enabled.
+4. In Claude Code, ask it to send this exact request using `burp_send_http_request`, and review Burp's one-time approval dialog before approving:
+
+   ```http
+   GET / HTTP/1.1
+   Host: 127.0.0.1:8000
+   Connection: close
+   ```
+
+   Use host `127.0.0.1`, port `8000`, and `https: false`. The expected response body is `Burp MCP local test endpoint`.
+
+5. Turn **Read-only mode** back on, stop the test server, and disable the extension server when finished.
+
+## Tools and capability limits
+
+The extension exposes connection/project status; filtered Proxy history and Site Map; request and response retrieval and summaries; response comparisons; request modification proposals; Repeater insertion; HTTP/1 and HTTP/2 send tools; heuristic header, cookie, CORS, authentication, and sensitive-data analysis; and bounded security reports.
+
+- `burp_send_http_request`, `burp_send_to_repeater`, and `burp_start_scan` require read-only mode off, an explicit host allowlist match, Burp scope membership, a rate-limit slot, and a fresh user approval. `burp_start_scan` launches a passive audit for one submitted request only. Active checks are disabled because the available Montoya API exposes only legacy active checks, which may include intrusive tests. Repeater insertion does not send the request; the user must click **Send** in Burp. No dedicated credential-attack or brute-force tools, Intruder automation, or unrestricted scan tool is exposed.
+- Scanner findings and scan controls report an explicit unsupported-capability error in Community Edition. The current Montoya API cannot enumerate existing Repeater tabs, so `burp_get_repeater_tabs` reports unsupported rather than returning fabricated data.
+- HTTP output is bounded, binary bodies are omitted, credentials are redacted, and captured content is marked untrusted. Security-analysis observations are heuristic; suspicious patterns are not labeled confirmed vulnerabilities.
+- HTTP requests have a 10-second response timeout and MCP-triggered network actions are limited to 30 per minute.
+- The listener binds to loopback by default. If you deliberately bind to a non-loopback address, bearer authentication must remain enabled. Use a firewall and do not expose the port to untrusted networks.
+
+## Tests and real Burp verification
+
+`.\gradlew.bat test` runs automated mock-backed tests and local MCP transport integration tests, including initialization, tool listing, input validation, permission checks, redaction, and parsing. The tests do not connect to a live Burp instance. A live Burp verification is the local-request procedure above; do not treat mock test success as proof of compatibility with every Burp release or edition.
+
+## References
+
+- [PortSwigger Burp MCP Server](https://github.com/PortSwigger/mcp-server)
+- [Montoya API documentation](https://portswigger.github.io/burp-extensions-montoya-api/)
+- [Kotlin MCP SDK](https://github.com/modelcontextprotocol/kotlin-sdk)
+- [Claude Code MCP setup](https://code.claude.com/docs/en/mcp)
+- [OmniRoute quick start](https://github.com/cheaper-inference/OmniRoute/blob/release/v3.8.53/docs/getting-started/QUICK-START.md)
+- [OmniRoute Claude Code model routing](https://github.com/cheaper-inference/OmniRoute/wiki/Claude-Code-Configuration)

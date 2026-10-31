@@ -7,11 +7,13 @@ import burp.api.montoya.core.BurpSuiteEdition
 import burp.api.montoya.core.ByteArray
 import burp.api.montoya.http.Http
 import burp.api.montoya.http.HttpMode
+import burp.api.montoya.http.RequestOptions
 import burp.api.montoya.http.HttpProtocol
 import burp.api.montoya.http.message.HttpHeader
 import burp.api.montoya.http.message.requests.HttpRequest
 import burp.api.montoya.logging.Logging
 import burp.api.montoya.persistence.PersistedObject
+import burp.api.montoya.scope.Scope
 import burp.api.montoya.proxy.Proxy
 import burp.api.montoya.proxy.ProxyHttpRequestResponse
 import burp.api.montoya.utilities.Base64Utils
@@ -32,8 +34,10 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import net.portswigger.mcp.KtorServerManager
 import net.portswigger.mcp.ServerState
-import net.portswigger.mcp.TestSseMcpClient
+import net.portswigger.mcp.TestStreamableHttpMcpClient
 import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.security.HttpRequestSecurity
+import net.portswigger.mcp.security.StateChangeSecurity
 import net.portswigger.mcp.schema.HttpRequestResponse
 import net.portswigger.mcp.schema.toSerializableForm
 import org.junit.jupiter.api.AfterEach
@@ -46,11 +50,12 @@ import javax.swing.JTextArea
 
 class ToolsKtTest {
     
-    private val client = TestSseMcpClient()
+    private var client = TestStreamableHttpMcpClient()
     private val api = mockk<MontoyaApi>(relaxed = true)
     private val serverManager = KtorServerManager(api)
     private val testPort = findAvailablePort()
-    private var serverStarted = false
+    @Volatile private var serverStarted = false
+    @Volatile private var serverFailure: Throwable? = null
     private val config: McpConfig
     private val mockHeaders = mutableListOf<HttpHeader>()
     private val capturedRequest = slot<HttpRequest>()
@@ -58,14 +63,18 @@ class ToolsKtTest {
     init {
         val persistedObject = mockk<PersistedObject>().apply {
             every { getBoolean("enabled") } returns true
+            every { getBoolean("readOnlyMode") } returns false
             every { getBoolean("configEditingTooling") } returns true
+            every { getBoolean("requireBearerToken") } returns true
             every { getBoolean("requireHttpRequestApproval") } returns false
             every { getBoolean("requireDataAccessApproval") } returns false
             every { getBoolean("_alwaysAllowHttpHistory") } returns false
             every { getBoolean("_alwaysAllowWebSocketHistory") } returns false
             every { getBoolean("_alwaysAllowOrganizer") } returns false
             every { getString("host") } returns "127.0.0.1"
-            every { getString("_autoApproveTargets") } returns ""
+            every { getString("bearerToken") } returns "test-token"
+            every { getString("_autoApproveTargets") } returns "example.com"
+            every { getInteger(any()) } returns null
             every { getInteger("port") } returns testPort
             every { setBoolean(any(), any()) } returns Unit
             every { setString(any(), any()) } returns Unit
@@ -109,6 +118,11 @@ class ToolsKtTest {
     }
 
     private fun setupHttpHeaderMocks() {
+        mockkStatic(RequestOptions::class)
+        val requestOptions = mockk<RequestOptions>()
+        every { RequestOptions.requestOptions() } returns requestOptions
+        every { requestOptions.withHttpMode(any()) } returns requestOptions
+
         every { HttpHeader.httpHeader(any<String>(), any<String>()) } answers {
             val name = firstArg<String>()
             val value = secondArg<String>()
@@ -134,20 +148,25 @@ class ToolsKtTest {
     @BeforeEach
     fun setup() {
         setupHttpHeaderMocks()
+        mockkObject(HttpRequestSecurity)
+        mockkObject(StateChangeSecurity)
+        coEvery { HttpRequestSecurity.checkAuthorizedRequest(any(), any(), any(), any()) } returns true
+        coEvery { StateChangeSecurity.confirm(any(), any(), any(), any()) } returns true
 
         serverManager.start(config) { state ->
             if (state is ServerState.Running) serverStarted = true
+            if (state is ServerState.Failed) serverFailure = state.exception
         }
 
         runBlocking {
             var attempts = 0
-            while (!serverStarted && attempts < 30) {
+            while (!serverStarted && serverFailure == null && attempts < 150) {
                 delay(100)
                 attempts++
             }
-            if (!serverStarted) throw IllegalStateException("Server failed to start after timeout")
+            if (!serverStarted) throw IllegalStateException("Server failed to start after timeout", serverFailure)
 
-            client.connectToServer("http://127.0.0.1:${testPort}")
+            client.connectToServer("http://127.0.0.1:${testPort}/mcp", config.bearerToken)
             assertNotNull(client.ping(), "Ping should return a result")
         }
     }
@@ -157,7 +176,23 @@ class ToolsKtTest {
     @AfterEach
     fun tearDown() {
         runBlocking { if (client.isConnected()) client.close() }
+        client = TestStreamableHttpMcpClient()
         serverManager.stop {}
+        unmockkObject(HttpRequestSecurity)
+        unmockkObject(StateChangeSecurity)
+    }
+
+    private fun markHistoryItemInScope(item: ProxyHttpRequestResponse) {
+        val request = mockk<HttpRequest>()
+        val service = mockk<burp.api.montoya.http.HttpService>()
+        val scope = mockk<Scope>()
+        every { item.finalRequest() } returns request
+        every { request.httpService() } returns service
+        every { service.host() } returns "example.com"
+        every { service.port() } returns 80
+        every { request.url() } returns "http://example.com/"
+        every { api.scope() } returns scope
+        every { scope.isInScope(any()) } returns true
     }
 
     @Nested
@@ -176,7 +211,7 @@ class ToolsKtTest {
             }
             every { api.http() } returns httpService
             every { httpResponse.toString() } returns "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nResponse body"
-            every { httpService.sendRequest(capture(capturedRequest)) } returns httpResponse
+            every { httpService.sendRequest(capture(capturedRequest), any<RequestOptions>()) } returns httpResponse
 
             runBlocking {
                 val result = client.callTool(
@@ -194,7 +229,7 @@ class ToolsKtTest {
                     "Expected success response but got error: $text")
             }
 
-            verify(exactly = 1) { httpService.sendRequest(any<HttpRequest>()) }
+            verify(exactly = 1) { httpService.sendRequest(any<HttpRequest>(), any<RequestOptions>()) }
             assertEquals("GET /foo HTTP/1.1\r\nHost: example.com\r\n\r\n", capturedRequest.captured.toString(), "Request body should match")
         }
 
@@ -210,7 +245,7 @@ class ToolsKtTest {
                 }
             }
             every { api.http() } returns httpService
-            every { httpService.sendRequest(any()) } returns null
+            every { httpService.sendRequest(any(), any<RequestOptions>()) } returns null
 
             runBlocking {
                 val result = client.callTool(
@@ -239,7 +274,7 @@ class ToolsKtTest {
             every { HttpRequest.http2Request(any(), capture(headersSlot), capture(bodySlot)) } returns httpRequest
             every { httpResponse.toString() } returns "HTTP/2 200 OK\r\nContent-Type: text/plain\r\n\r\nResponse body"
             every { api.http() } returns httpService
-            every { httpService.sendRequest(capture(requestSlot), HttpMode.HTTP_2) } returns httpResponse
+            every { httpService.sendRequest(capture(requestSlot), any<RequestOptions>()) } returns httpResponse
 
             val pseudoHeaders = mapOf(
                 "authority" to "example.com", "scheme" to "https", "method" to "GET", ":path" to "/test"
@@ -290,7 +325,7 @@ class ToolsKtTest {
 
             every { HttpRequest.http2Request(any(), any(), any<String>()) } returns httpRequest
             every { api.http() } returns httpService
-            every { httpService.sendRequest(any(), HttpMode.HTTP_2) } returns null
+            every { httpService.sendRequest(any(), any<RequestOptions>()) } returns null
 
             val pseudoHeaders = mapOf("method" to "GET", "path" to "/test")
             val headers = mapOf("User-Agent" to "Test Agent")
@@ -322,7 +357,7 @@ class ToolsKtTest {
             every { HttpRequest.http2Request(any(), capture(headersSlot), any<String>()) } returns httpRequest
             every { httpResponse.toString() } returns "HTTP/2 200 OK"
             every { api.http() } returns httpService
-            every { httpService.sendRequest(any(), HttpMode.HTTP_2) } returns httpResponse
+            every { httpService.sendRequest(any(), any<RequestOptions>()) } returns httpResponse
 
             val pseudoHeaders = mapOf(
                 "path" to "/test",
@@ -667,7 +702,9 @@ class ToolsKtTest {
                 val result = client.callTool("get_active_editor_contents", emptyMap())
                 
                 delay(100)
-                result.expectTextContent("Editor content")
+                val text = result.expectTextContent()
+                assertTrue(text.contains("[UNTRUSTED CAPTURED DATA"))
+                assertTrue(text.contains("Editor content"))
             }
         }
         
@@ -746,6 +783,7 @@ class ToolsKtTest {
             
             every { api.proxy() } returns proxy
             every { proxy.history() } returns proxyHistory
+            proxyHistory.forEach(::markHistoryItemInScope)
             
             mockkStatic("net.portswigger.mcp.schema.SerializationKt")
             
@@ -808,6 +846,7 @@ class ToolsKtTest {
             val historyItem = mockk<ProxyHttpRequestResponse>()
             every { api.proxy() } returns proxy
             every { proxy.history() } returns listOf(historyItem)
+            markHistoryItemInScope(historyItem)
 
             mockkStatic("net.portswigger.mcp.schema.SerializationKt")
             every { historyItem.toSerializableForm() } returns HttpRequestResponse(
@@ -857,20 +896,24 @@ class ToolsKtTest {
             every { collaboratorClient.server() } returns collaboratorServer
             every { collaboratorServer.address() } returns "burpcollaborator.net"
 
+            runBlocking { client.close() }
+            client = TestStreamableHttpMcpClient()
             serverManager.stop {}
             serverStarted = false
+            serverFailure = null
             serverManager.start(config) { state ->
                 if (state is ServerState.Running) serverStarted = true
+                if (state is ServerState.Failed) serverFailure = state.exception
             }
 
             runBlocking {
                 var attempts = 0
-                while (!serverStarted && attempts < 30) {
+                while (!serverStarted && serverFailure == null && attempts < 150) {
                     delay(100)
                     attempts++
                 }
-                if (!serverStarted) throw IllegalStateException("Server failed to start after timeout")
-                client.connectToServer("http://127.0.0.1:${testPort}")
+                if (!serverStarted) throw IllegalStateException("Server failed to start after timeout", serverFailure)
+                client.connectToServer("http://127.0.0.1:${testPort}/mcp", config.bearerToken)
             }
         }
 
@@ -977,9 +1020,21 @@ class ToolsKtTest {
         @Test
         fun `get interactions should return http interaction details`() {
             val mockRequest = mockk<burp.api.montoya.http.message.requests.HttpRequest>()
-            every { mockRequest.toString() } returns "GET / HTTP/1.1"
+            val emptyBody = mockk<ByteArray>()
+            every { emptyBody.length() } returns 0
+            every { mockRequest.method() } returns "GET"
+            every { mockRequest.path() } returns "/"
+            every { mockRequest.httpVersion() } returns "HTTP/1.1"
+            every { mockRequest.headers() } returns emptyList()
+            every { mockRequest.headerValue(any()) } returns ""
+            every { mockRequest.body() } returns emptyBody
             val mockResponse = mockk<burp.api.montoya.http.message.responses.HttpResponse>()
-            every { mockResponse.toString() } returns "HTTP/1.1 200 OK"
+            every { mockResponse.httpVersion() } returns "HTTP/1.1"
+            every { mockResponse.statusCode() } returns 200.toShort()
+            every { mockResponse.reasonPhrase() } returns "OK"
+            every { mockResponse.headers() } returns emptyList()
+            every { mockResponse.headerValue(any()) } returns ""
+            every { mockResponse.body() } returns emptyBody
             val mockRequestResponse = mockk<burp.api.montoya.http.message.HttpRequestResponse>()
             every { mockRequestResponse.request() } returns mockRequest
             every { mockRequestResponse.response() } returns mockResponse
@@ -1081,21 +1136,25 @@ class ToolsKtTest {
 
         every { version.edition() } returns BurpSuiteEdition.PROFESSIONAL
 
+        runBlocking { client.close() }
+        client = TestStreamableHttpMcpClient()
         serverManager.stop {}
         serverStarted = false
+        serverFailure = null
         serverManager.start(config) { state ->
             if (state is ServerState.Running) serverStarted = true
+            if (state is ServerState.Failed) serverFailure = state.exception
         }
 
         runBlocking {
             var attempts = 0
-            while (!serverStarted && attempts < 30) {
+            while (!serverStarted && serverFailure == null && attempts < 150) {
                 delay(100)
                 attempts++
             }
-            if (!serverStarted) throw IllegalStateException("Server failed to start after timeout")
+            if (!serverStarted) throw IllegalStateException("Server failed to start after timeout", serverFailure)
 
-            client.connectToServer("http://127.0.0.1:${testPort}")
+            client.connectToServer("http://127.0.0.1:${testPort}/mcp", config.bearerToken)
 
             val tools = client.listTools()
             assertTrue(tools.any { it.name == "get_scanner_issues" })

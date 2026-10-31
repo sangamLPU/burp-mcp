@@ -6,20 +6,27 @@ import burp.api.montoya.burpsuite.TaskExecutionEngine.TaskExecutionEngineState.R
 import burp.api.montoya.collaborator.InteractionFilter
 import burp.api.montoya.core.BurpSuiteEdition
 import burp.api.montoya.http.HttpMode
+import burp.api.montoya.http.RequestOptions
 import burp.api.montoya.http.HttpService
 import burp.api.montoya.http.message.HttpHeader
 import burp.api.montoya.http.message.requests.HttpRequest
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.compat.MontoyaRuntimeCompat
 import net.portswigger.mcp.schema.encodeHistoryItem
+import net.portswigger.mcp.schema.organizerItemToSerializableForm
 import net.portswigger.mcp.schema.toSerializableForm
 import net.portswigger.mcp.security.DataAccessSecurity
 import net.portswigger.mcp.security.DataAccessType
 import net.portswigger.mcp.security.HttpRequestSecurity
+import net.portswigger.mcp.security.SafeContent
+import net.portswigger.mcp.security.StateChangeSecurity
 import net.portswigger.mcp.security.filterConfigCredentials
 import java.awt.KeyboardFocusManager
 import java.util.regex.Pattern
@@ -112,21 +119,19 @@ private fun normalizePrelude(prelude: String): String = prelude
 fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
     mcpTool<SendHttp1Request>("Issues an HTTP/1.1 request and returns the response.") {
-        val allowed = HttpRequestSecurity.checkHttpRequestPermission(targetHostname, targetPort, config, content, api)
+        require(content.toByteArray().size <= SafeContent.MAX_REQUEST_BYTES) { "HTTP request exceeds the 1 MiB limit" }
+        val fixedContent = normalizeHttpContent(content)
+        val request = HttpRequest.httpRequest(toMontoyaService(), fixedContent)
+        val allowed = HttpRequestSecurity.checkAuthorizedRequest(request, config, api, "burp_send_http_request")
         if (!allowed) {
-            api.logging().logToOutput("MCP HTTP request denied: $targetHostname:$targetPort")
-            return@mcpTool "Send HTTP request denied by Burp Suite"
+            return@mcpTool "Request denied. Check read-only mode, Burp target scope, the explicit host allowlist, and the one-time approval dialog."
         }
 
         api.logging().logToOutput("MCP HTTP/1.1 request: $targetHostname:$targetPort")
-
-        val fixedContent = normalizeHttpContent(content)
-
-        val request = HttpRequest.httpRequest(toMontoyaService(), fixedContent)
         currentCoroutineContext().ensureActive()
-        val response = api.http().sendRequest(request)
+        val response = BurpHttpRequestExecutor.send(api, request, RequestOptions.requestOptions(), 10_000)
 
-        response?.toString() ?: "<no response>"
+        SafeContent.render(response?.response())
     }
 
     mcpTool<SendHttp2Request>("Issues an HTTP/2 request and returns the response. Do NOT pass headers to the body parameter.") {
@@ -144,39 +149,41 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             }
         }
 
-        val allowed = HttpRequestSecurity.checkHttpRequestPermission(targetHostname, targetPort, config, http2RequestDisplay, api)
+        require(http2RequestDisplay.toByteArray().size <= SafeContent.MAX_REQUEST_BYTES) { "HTTP request exceeds the 1 MiB limit" }
+        val headerList = buildHttp2HeaderList(pseudoHeaders, headers)
+        val request = HttpRequest.http2Request(toMontoyaService(), headerList, requestBody)
+        val allowed = HttpRequestSecurity.checkAuthorizedRequest(request, config, api, "burp_send_http_request")
         if (!allowed) {
-            api.logging().logToOutput("MCP HTTP request denied: $targetHostname:$targetPort")
-            return@mcpTool "Send HTTP request denied by Burp Suite"
+            return@mcpTool "Request denied. Check read-only mode, Burp target scope, the explicit host allowlist, and the one-time approval dialog."
         }
 
         api.logging().logToOutput("MCP HTTP/2 request: $targetHostname:$targetPort")
-
-        val headerList = buildHttp2HeaderList(pseudoHeaders, headers)
-
-        val request = HttpRequest.http2Request(toMontoyaService(), headerList, requestBody)
         currentCoroutineContext().ensureActive()
-        val response = api.http().sendRequest(request, HttpMode.HTTP_2)
+        val response = BurpHttpRequestExecutor.send(
+            api, request, RequestOptions.requestOptions().withHttpMode(HttpMode.HTTP_2), 10_000
+        )
 
-        response?.toString() ?: "<no response>"
+        SafeContent.render(response?.response())
     }
 
-    mcpUnitTool<CreateRepeaterTab>("Creates an HTTP/1.1 Repeater tab with the specified raw HTTP request and optional tab name. Make sure to use carriage returns appropriately. Prefer create_repeater_tab_http2 for modern web targets that speak HTTP/2.") {
+    mcpTool<CreateRepeaterTab>("Creates an HTTP/1.1 Repeater tab with the specified raw HTTP request and optional tab name. Requires read-only mode off, in-scope allowlisted target, and one-time user approval.") {
         val fixedContent = normalizeHttpContent(content)
         val request = HttpRequest.httpRequest(toMontoyaService(), fixedContent)
+        if (!HttpRequestSecurity.checkAuthorizedRequest(request, config, api, "burp_send_to_repeater")) {
+            return@mcpTool "Repeater action denied by Burp MCP security controls."
+        }
         api.repeater().sendToRepeater(request, tabName)
+        "Request copied to a Repeater tab. Burp will not send it until you click Send."
     }
 
-    mcpUnitTool<CreateRepeaterTabHttp2>("Creates an HTTP/2 Repeater tab with the specified HTTP/2 request and optional tab name. Use this by default for modern web targets. Do NOT pass headers to the body parameter.") {
+    mcpTool<CreateRepeaterTabHttp2>("Creates an HTTP/2 Repeater tab with the specified HTTP/2 request and optional tab name. Requires read-only mode off, in-scope allowlisted target, and one-time user approval.") {
         val headerList = buildHttp2HeaderList(pseudoHeaders, headers)
         val request = HttpRequest.http2Request(toMontoyaService(), headerList, requestBody)
+        if (!HttpRequestSecurity.checkAuthorizedRequest(request, config, api, "burp_send_to_repeater")) {
+            return@mcpTool "Repeater action denied by Burp MCP security controls."
+        }
         api.repeater().sendToRepeater(request, tabName)
-    }
-
-    mcpUnitTool<SendToIntruder>("Sends an HTTP request to Intruder with the specified HTTP request and optional tab name. Make sure to use carriage returns appropriately.") {
-        val fixedContent = normalizeHttpContent(content)
-        val request = HttpRequest.httpRequest(toMontoyaService(), fixedContent)
-        api.intruder().sendToIntruder(request, tabName)
+        "HTTP/2 request copied to a Repeater tab. Burp will not send it until you click Send."
     }
 
     mcpTool<UrlEncode>("URL encodes the input string") {
@@ -227,11 +234,15 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         "User has disabled configuration editing. They can enable it in the MCP tab in Burp by selecting 'Enable tools that can edit your config'"
 
     mcpTool<SetProjectOptions>("Sets project-level configuration in JSON format. This will be merged with existing configuration. Make sure to export before doing this, so you know what the schema is. Make sure the JSON has a top level 'user_options' object!") {
-        if (config.configEditingTooling) {
-            api.logging().logToOutput("Setting project-level configuration: $json")
+        if (config.readOnlyMode) {
+            "Denied: read-only mode is enabled."
+        } else if (config.configEditingTooling && StateChangeSecurity.confirm(api, config, "Edit project configuration", "Configuration payload omitted from the approval dialog and audit log.")) {
+            api.logging().logToOutput("MCP applying project-level configuration (payload omitted)")
             api.burpSuite().importProjectOptionsFromJson(json)
 
             "Project configuration has been applied"
+        } else if (config.configEditingTooling) {
+            "Denied: user did not approve the configuration change."
         } else {
             toolingDisabledMessage
         }
@@ -239,11 +250,15 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
 
     mcpTool<SetUserOptions>("Sets user-level configuration in JSON format. This will be merged with existing configuration. Make sure to export before doing this, so you know what the schema is. Make sure the JSON has a top level 'project_options' object!") {
-        if (config.configEditingTooling) {
-            api.logging().logToOutput("Setting user-level configuration: $json")
+        if (config.readOnlyMode) {
+            "Denied: read-only mode is enabled."
+        } else if (config.configEditingTooling && StateChangeSecurity.confirm(api, config, "Edit user configuration", "Configuration payload omitted from the approval dialog and audit log.")) {
+            api.logging().logToOutput("MCP applying user-level configuration (payload omitted)")
             api.burpSuite().importUserOptionsFromJson(json)
 
             "User configuration has been applied"
+        } else if (config.configEditingTooling) {
+            "Denied: user did not approve the configuration change."
         } else {
             toolingDisabledMessage
         }
@@ -251,7 +266,16 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
     if (api.burpSuite().version().edition() == BurpSuiteEdition.PROFESSIONAL) {
         mcpPaginatedTool<GetScannerIssues>("Displays information about issues identified by the scanner") {
-            api.siteMap().issues().asSequence().map { Json.encodeToString(it.toSerializableForm()) }
+            api.siteMap().issues().asSequence()
+                .filter { issue ->
+                    val baseUrl = issue.baseUrl()
+                    val parsed = runCatching { java.net.URI(baseUrl) }.getOrNull()
+                    val host = parsed?.host?.removeSurrounding("[", "]")
+                    val port = parsed?.let { if (it.port > 0) it.port else if (it.scheme.equals("https", true)) 443 else 80 } ?: -1
+                    host != null && port > 0 && HttpRequestSecurity.isAllowedByHostAllowlist(host, port, config) &&
+                        runCatching { api.scope().isInScope(baseUrl) }.getOrDefault(false)
+                }
+                .map { Json.encodeToString(it.toSerializableForm()) }
         }
 
         val collaboratorClient by lazy { api.collaborator().createClient() }
@@ -261,6 +285,9 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             "Inject this payload into requests to detect server-side interactions (DNS lookups, HTTP requests, SMTP). " +
             "Use get_collaborator_interactions with the returned payloadId to check for interactions."
         ) {
+            if (!StateChangeSecurity.confirm(api, config, "Generate Collaborator payload", "Out-of-band test payload generation")) {
+                return@mcpTool "Denied: read-only mode is enabled or the operation was not approved."
+            }
             api.logging().logToOutput("MCP generating Collaborator payload${customData?.let { " with custom data" } ?: ""}")
 
             val payload = if (customData != null) {
@@ -302,7 +329,9 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             return@mcpPaginatedTool sequenceOf("HTTP history access denied by Burp Suite")
         }
 
-        api.proxy().history().asSequence().map { encodeHistoryItem(it.toSerializableForm()) }
+        api.proxy().history().asSequence()
+            .filter { isAuthorizedItem(it, api, config) }
+            .map { encodeHistoryItem(it.toSerializableForm()) }
     }
 
     mcpPaginatedTool<GetProxyHttpHistoryRegex>("Displays items matching a specified regex within the proxy HTTP history") {
@@ -313,6 +342,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
         val compiledRegex = Pattern.compile(regex)
         api.proxy().history { it.contains(compiledRegex) }.asSequence()
+            .filter { isAuthorizedItem(it, api, config) }
             .map { encodeHistoryItem(it.toSerializableForm()) }
     }
 
@@ -322,7 +352,14 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
             return@mcpPaginatedTool sequenceOf("Organizer access denied by Burp Suite")
         }
 
-        api.organizer().items().asSequence().map { encodeHistoryItem(it.toSerializableForm()) }
+        val organizerItems = MontoyaRuntimeCompat.organizerItems(api)
+            ?: throw McpToolError("Unsupported capability: this Burp Montoya runtime can send items to Organizer but cannot retrieve Organizer items.")
+        organizerItems.asSequence()
+            .filter { item ->
+                val request = MontoyaRuntimeCompat.readNoArg(item, "request") as? HttpRequest
+                request != null && isAuthorizedRequest(request, api, config)
+            }
+            .map { encodeHistoryItem(organizerItemToSerializableForm(it)) }
     }
 
     mcpPaginatedTool<GetOrganizerItemsRegex>("Displays items matching a specified regex within the Organizer tab") {
@@ -332,38 +369,33 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         }
 
         val compiledRegex = Pattern.compile(regex)
-        api.organizer().items { it.contains(compiledRegex) }.asSequence()
-            .map { encodeHistoryItem(it.toSerializableForm()) }
+        val organizerItems = MontoyaRuntimeCompat.organizerItems(api)
+            ?: throw McpToolError("Unsupported capability: this Burp Montoya runtime can send items to Organizer but cannot retrieve or search Organizer items.")
+        organizerItems.asSequence()
+            .filter { item -> MontoyaRuntimeCompat.organizerItemMatches(item, compiledRegex) }
+            .filter { item ->
+                val request = MontoyaRuntimeCompat.readNoArg(item, "request") as? HttpRequest
+                request != null && isAuthorizedRequest(request, api, config)
+            }
+            .map { encodeHistoryItem(organizerItemToSerializableForm(it)) }
     }
 
-    mcpPaginatedTool<GetProxyWebsocketHistory>("Displays items within the proxy WebSocket history") {
-        val allowed = checkDataAccessOrDeny(DataAccessType.WEBSOCKET_HISTORY, config, api, "WebSocket history")
-        if (!allowed) {
-            return@mcpPaginatedTool sequenceOf("WebSocket history access denied by Burp Suite")
-        }
-
-        api.proxy().webSocketHistory().asSequence()
-            .map { encodeHistoryItem(it.toSerializableForm()) }
-    }
-
-    mcpPaginatedTool<GetProxyWebsocketHistoryRegex>("Displays items matching a specified regex within the proxy WebSocket history") {
-        val allowed = checkDataAccessOrDeny(DataAccessType.WEBSOCKET_HISTORY, config, api, "WebSocket history")
-        if (!allowed) {
-            return@mcpPaginatedTool sequenceOf("WebSocket history access denied by Burp Suite")
-        }
-
-        val compiledRegex = Pattern.compile(regex)
-        api.proxy().webSocketHistory { it.contains(compiledRegex) }.asSequence()
-            .map { encodeHistoryItem(it.toSerializableForm()) }
-    }
+    // WebSocket history is deliberately not exposed: the current Montoya message API does not
+    // provide enough connection metadata here to enforce the same scope and host allowlist.
 
     mcpTool<SetTaskExecutionEngineState>("Sets the state of Burp's task execution engine (paused or unpaused)") {
+        if (!StateChangeSecurity.confirm(api, config, "Change Burp task execution", "Set task execution running=$running")) {
+            return@mcpTool "Denied: read-only mode is enabled or the operation was not approved."
+        }
         api.burpSuite().taskExecutionEngine().state = if (running) RUNNING else PAUSED
 
         "Task execution engine is now ${if (running) "running" else "paused"}"
     }
 
     mcpTool<SetProxyInterceptState>("Enables or disables Burp Proxy Intercept") {
+        if (!StateChangeSecurity.confirm(api, config, "Change Proxy interception", "Set intercepting=$intercepting")) {
+            return@mcpTool "Denied: read-only mode is enabled or the operation was not approved."
+        }
         if (intercepting) {
             api.proxy().enableIntercept()
         } else {
@@ -373,17 +405,19 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
         "Intercept has been ${if (intercepting) "enabled" else "disabled"}"
     }
 
-    mcpTool("get_active_editor_contents", "Outputs the contents of the user's active message editor") {
-        getActiveEditor(api)?.text ?: "<No active editor>"
+    mcpTool("get_active_editor_contents", "Outputs the contents of the user's active message editor. Captured content is redacted and marked as untrusted data.") {
+        val text = getActiveEditor(api)?.text ?: return@mcpTool "<No active editor>"
+        SafeContent.redactRaw(text)
     }
 
     mcpTool<SetActiveEditorContents>("Sets the content of the user's active message editor") {
         val editor = getActiveEditor(api) ?: return@mcpTool "<No active editor>"
-
         if (!editor.isEditable) {
             return@mcpTool "<Current editor is not editable>"
         }
-
+        if (!StateChangeSecurity.confirm(api, config, "Modify active Burp editor", "Editor content omitted from the approval dialog and audit log.")) {
+            return@mcpTool "Denied: read-only mode is enabled or the operation was not approved."
+        }
         editor.text = text
 
         "Editor text has been set"

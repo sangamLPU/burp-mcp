@@ -1,7 +1,6 @@
 package net.portswigger.mcp.config.components
 
 import net.portswigger.mcp.config.Design
-import java.awt.Dimension
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
@@ -39,7 +38,7 @@ class AdvancedOptionsPanel(
     }
 
     private fun buildPanel() {
-        add(Design.createSectionLabel("Advanced Options"))
+        add(Design.createSectionLabel("MCP Endpoint"))
         add(createVerticalStrut(Design.Spacing.MD))
 
         val formPanel = createFormPanel(
@@ -91,8 +90,10 @@ class AdvancedOptionsPanel(
             gbc.insets = Insets(Design.Spacing.SM, 0, Design.Spacing.SM, 0)
 
             if (field is JTextField) {
-                field.preferredSize = Dimension(200, 32)
                 field.font = Design.Typography.bodyLarge
+                val fieldHeight = field.getFontMetrics(field.font).height + Design.Spacing.SM
+                field.preferredSize = java.awt.Dimension(field.preferredSize.width, fieldHeight)
+                field.minimumSize = java.awt.Dimension(0, fieldHeight)
             }
 
             formPanel.add(field, gbc)

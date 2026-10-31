@@ -290,12 +290,13 @@ object Dialogs {
         message: String,
         options: Array<String>,
         requestContent: String? = null,
-        api: MontoyaApi? = null
+        api: MontoyaApi? = null,
+        title: String = "Burp MCP approval"
     ): Int = suspendCancellableCoroutine { continuation ->
         SwingUtilities.invokeLater {
             if (!continuation.isActive) return@invokeLater
             try {
-                val result = showOptionDialog(parent, message, options, requestContent, api) { dialog ->
+                val result = showOptionDialog(parent, message, options, requestContent, api, title) { dialog ->
                     continuation.invokeOnCancellation {
                         SwingUtilities.invokeLater { dialog.dispose() }
                     }
@@ -314,9 +315,11 @@ object Dialogs {
         options: Array<String>,
         requestContent: String? = null,
         api: MontoyaApi? = null,
+        title: String = "Burp MCP approval",
         onShow: (JDialog) -> Boolean = { true }
     ): Int {
         val dialog = createDialog(parent)
+        dialog.title = title
         var result = -1
 
         val messageArea = JTextArea(message).apply {

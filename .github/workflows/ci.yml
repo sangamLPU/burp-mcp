@@ -25,7 +25,7 @@ jobs:
       - uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5.4.0
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 17
 
       - uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
         with:
@@ -35,7 +35,7 @@ jobs:
         run: ./gradlew test
 
       - name: Build extension JAR
-        run: ./gradlew embedProxyJar
+        run: ./gradlew shadowJar
 
       - name: Upload test reports
         if: failure()
@@ -65,6 +65,6 @@ jobs:
       - uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5.4.0
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 17
 
       - uses: gradle/actions/dependency-submission@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0

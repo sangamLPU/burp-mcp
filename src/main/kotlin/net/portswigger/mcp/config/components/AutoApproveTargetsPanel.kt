@@ -37,21 +37,29 @@ class AutoApproveTargetsPanel(private val config: McpConfig) : JPanel() {
     }
 
     private fun buildPanel() {
-        add(Design.createSectionLabel("Auto-Approved HTTP Targets"))
+        add(Design.createSectionLabel("Authorized HTTP Host Allowlist"))
         add(Box.createVerticalStrut(Design.Spacing.MD))
 
-        val descLabel = JLabel("Specify domains and hosts that can be accessed without approval.").apply {
+        fun wrappedText(text: String, font: java.awt.Font, rows: Int) = JTextArea(text, rows, 48).apply {
             alignmentX = LEFT_ALIGNMENT
-            font = Design.Typography.bodyMedium
+            this.font = font
             foreground = Design.Colors.onSurfaceVariant
-            border = BorderFactory.createEmptyBorder(0, 0, Design.Spacing.SM, 0)
+            isEditable = false
+            isFocusable = false
+            isOpaque = false
+            lineWrap = true
+            wrapStyleWord = true
+            border = BorderFactory.createEmptyBorder()
+            minimumSize = Dimension(0, preferredSize.height)
+            maximumSize = Dimension(Int.MAX_VALUE, preferredSize.height)
         }
-        val examplesLabel = JLabel("Examples: example.com, localhost:8080, *.api.com").apply {
-            alignmentX = LEFT_ALIGNMENT
-            font = Design.Typography.labelMedium
-            foreground = Design.Colors.onSurfaceVariant
-            border = BorderFactory.createEmptyBorder(0, 0, Design.Spacing.MD, 0)
-        }
+        val descLabel = wrappedText(
+            "Requests must match this allowlist and Burp scope. Each network request still needs one-time approval.",
+            Design.Typography.bodyMedium,
+            3
+        ).apply { border = BorderFactory.createEmptyBorder(0, 0, Design.Spacing.SM, 0) }
+        val examplesLabel = wrappedText("Examples: example.com, localhost:8080, *.api.com", Design.Typography.labelMedium, 2)
+            .apply { border = BorderFactory.createEmptyBorder(0, 0, Design.Spacing.MD, 0) }
         add(descLabel)
         add(examplesLabel)
 
@@ -183,15 +191,13 @@ class AutoApproveTargetsPanel(private val config: McpConfig) : JPanel() {
 
     private fun createScrollPane(targetsList: JList<String>): JScrollPane {
         return JScrollPane(targetsList).apply {
-            val baseHeight = 220
-            val baseWidth = 400
-            val scaleFactor = Design.Spacing.MD / 16f
-            val responsiveHeight = (baseHeight * scaleFactor).toInt().coerceAtLeast(150)
-            val responsiveWidth = (baseWidth * scaleFactor).toInt().coerceAtLeast(250)
+            val rowHeight = targetsList.getFontMetrics(targetsList.font).height + Design.Spacing.SM * 2
+            val responsiveHeight = rowHeight * 7
+            val responsiveWidth = targetsList.getFontMetrics(targetsList.font).charWidth('M') * 36
 
             maximumSize = Dimension(Int.MAX_VALUE, responsiveHeight)
             preferredSize = Dimension(responsiveWidth, responsiveHeight)
-            minimumSize = Dimension((responsiveWidth * 0.625f).toInt(), (responsiveHeight * 0.68f).toInt())
+            minimumSize = Dimension(0, rowHeight * 4)
             border = BorderFactory.createCompoundBorder(
                 BorderFactory.createLineBorder(Design.Colors.listBorder, 1), BorderFactory.createEmptyBorder(1, 1, 1, 1)
             )

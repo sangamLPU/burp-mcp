@@ -3,22 +3,23 @@ package net.portswigger.mcp
 import io.ktor.client.*
 import io.ktor.client.plugins.*
 import io.ktor.client.plugins.sse.*
+import io.ktor.http.HttpHeaders
 import io.modelcontextprotocol.kotlin.sdk.client.Client
-import io.modelcontextprotocol.kotlin.sdk.client.SseClientTransport
+import io.modelcontextprotocol.kotlin.sdk.client.StreamableHttpClientTransport
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.EmptyResult
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.Tool
 import org.slf4j.LoggerFactory
 
-class TestSseMcpClient {
-    private val logger = LoggerFactory.getLogger(TestSseMcpClient::class.java)
+class TestStreamableHttpMcpClient {
+    private val logger = LoggerFactory.getLogger(TestStreamableHttpMcpClient::class.java)
     private val mcp: Client = Client(clientInfo = Implementation(name = "test-mcp-client", version = "1.0.0"))
     private var connected = false
 
     private lateinit var tools: List<Tool>
 
-    suspend fun connectToServer(sseUrl: String) {
+    suspend fun connectToServer(mcpUrl: String, bearerToken: String) {
         try {
             val httpClient = HttpClient {
                 install(SSE)
@@ -28,7 +29,11 @@ class TestSseMcpClient {
                 }
             }
 
-            val transport = SseClientTransport(httpClient, urlString = sseUrl)
+            val transport = StreamableHttpClientTransport(
+                httpClient,
+                mcpUrl,
+                requestBuilder = { headers.append(HttpHeaders.Authorization, "Bearer $bearerToken") }
+            )
 
             mcp.connect(transport)
             connected = true

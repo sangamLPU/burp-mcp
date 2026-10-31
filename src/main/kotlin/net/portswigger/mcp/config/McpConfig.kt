@@ -3,20 +3,41 @@ package net.portswigger.mcp.config
 import burp.api.montoya.logging.Logging
 import burp.api.montoya.persistence.PersistedObject
 import java.lang.ref.WeakReference
+import java.security.SecureRandom
+import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.properties.ReadWriteProperty
 import kotlin.reflect.KProperty
 
 private const val TARGET_SEPARATOR = "\n"
+private const val DEFAULT_INTERCEPTION_TIMEOUT_SECONDS = 60
+private const val MIN_INTERCEPTION_TIMEOUT_SECONDS = 5
+private const val MAX_INTERCEPTION_TIMEOUT_SECONDS = 120
 
 class McpConfig(storage: PersistedObject, private val logging: Logging) {
 
     var enabled by storage.boolean(true)
+    var readOnlyMode by storage.boolean(true)
+    var requireBearerToken by storage.boolean(true)
+    var bearerToken by storage.string("")
     var configEditingTooling by storage.boolean(false)
     var host by storage.string("127.0.0.1")
     var port by storage.int(9876)
     var requireHttpRequestApproval by storage.boolean(true)
     var requireDataAccessApproval by storage.boolean(true)
+
+    private var storedInterceptionTimeoutSeconds by storage.int(DEFAULT_INTERCEPTION_TIMEOUT_SECONDS)
+    var interceptionTimeoutSeconds: Int
+        get() = storedInterceptionTimeoutSeconds.coerceIn(
+            MIN_INTERCEPTION_TIMEOUT_SECONDS,
+            MAX_INTERCEPTION_TIMEOUT_SECONDS
+        )
+        set(value) {
+            require(value in MIN_INTERCEPTION_TIMEOUT_SECONDS..MAX_INTERCEPTION_TIMEOUT_SECONDS) {
+                "Interception timeout must be between $MIN_INTERCEPTION_TIMEOUT_SECONDS and $MAX_INTERCEPTION_TIMEOUT_SECONDS seconds"
+            }
+            storedInterceptionTimeoutSeconds = value
+        }
 
     private var _alwaysAllowHttpHistory by storage.boolean(false)
     var alwaysAllowHttpHistory: Boolean
@@ -64,6 +85,12 @@ class McpConfig(storage: PersistedObject, private val logging: Logging) {
         }
 
     init {
+        if (storedInterceptionTimeoutSeconds !in MIN_INTERCEPTION_TIMEOUT_SECONDS..MAX_INTERCEPTION_TIMEOUT_SECONDS) {
+            storedInterceptionTimeoutSeconds = DEFAULT_INTERCEPTION_TIMEOUT_SECONDS
+        }
+        if (bearerToken.isBlank()) {
+            bearerToken = generateBearerToken()
+        }
         val current = getAutoApproveTargetsList()
         val valid = current.filter { TargetValidation.isValidTarget(it) }
         if (valid.size != current.size) {
@@ -155,6 +182,12 @@ class McpConfig(storage: PersistedObject, private val logging: Logging) {
     fun cleanup() {
         targetsChangeListeners.clear()
         dataAccessChangeListeners.clear()
+    }
+
+    private fun generateBearerToken(): String {
+        val bytes = ByteArray(32)
+        SecureRandom().nextBytes(bytes)
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
     }
 }
 
