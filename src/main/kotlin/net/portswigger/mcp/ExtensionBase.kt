@@ -4,9 +4,7 @@ import burp.api.montoya.BurpExtension
 import burp.api.montoya.MontoyaApi
 import net.portswigger.mcp.config.ConfigUi
 import net.portswigger.mcp.config.McpConfig
-import net.portswigger.mcp.providers.ClaudeDesktopProvider
-import net.portswigger.mcp.providers.ManualProxyInstallerProvider
-import net.portswigger.mcp.providers.ProxyJarManager
+import net.portswigger.mcp.intercept.LiveInterception
 
 @Suppress("unused")
 class ExtensionBase : BurpExtension {
@@ -15,16 +13,11 @@ class ExtensionBase : BurpExtension {
         api.extension().setName("Burp MCP Server")
 
         val config = McpConfig(api.persistence().extensionData(), api.logging())
-        val serverManager = KtorServerManager(api)
+        val live = LiveInterception(api, config)
+        live.install()
+        val serverManager = KtorServerManager(api, live)
 
-        val proxyJarManager = ProxyJarManager(api.logging())
-
-        val configUi = ConfigUi(
-            config = config, providers = listOf(
-                ClaudeDesktopProvider(api.logging(), proxyJarManager),
-                ManualProxyInstallerProvider(api.logging(), proxyJarManager),
-            )
-        )
+        val configUi = ConfigUi(config, live)
 
         configUi.onEnabledToggled { enabled ->
             configUi.getConfig()
@@ -40,9 +33,10 @@ class ExtensionBase : BurpExtension {
             }
         }
 
-        api.userInterface().registerSuiteTab("MCP", configUi.component)
+        api.userInterface().registerSuiteTab("Burp MCP", configUi.component)
 
         api.extension().registerUnloadingHandler {
+            live.close()
             serverManager.shutdown()
             configUi.cleanup()
             config.cleanup()

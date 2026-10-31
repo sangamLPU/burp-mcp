@@ -1,33 +1,6 @@
 import java.time.Instant
-
-abstract class EmbedProxyJarTask : DefaultTask() {
-    @get:InputFile
-    abstract val shadowJarFile: RegularFileProperty
-
-    @get:InputDirectory
-    abstract val projectDir: DirectoryProperty
-
-    @get:Inject
-    abstract val execOperations: ExecOperations
-
-    @TaskAction
-    fun embedJar() {
-        val shadowJar = shadowJarFile.get().asFile
-        val libsDir = projectDir.dir("libs").get().asFile
-        val proxyJarFile = File(libsDir, "mcp-proxy-all.jar")
-
-        if (!proxyJarFile.exists()) {
-            throw GradleException("Proxy JAR not found at: ${proxyJarFile.absolutePath}")
-        }
-
-        execOperations.exec {
-            workingDir(projectDir.get().asFile)
-            commandLine("jar", "uf", shadowJar.absolutePath, "-C", libsDir.absolutePath, proxyJarFile.name)
-        }
-
-        logger.lifecycle("Embedded proxy JAR into ${shadowJar.name}")
-    }
-}
+import org.gradle.api.tasks.bundling.AbstractArchiveTask
+import org.gradle.api.tasks.testing.Test
 
 plugins {
     alias(libs.plugins.kotlin.jvm)
@@ -53,7 +26,12 @@ dependencies {
     testImplementation(libs.burp.montoya.api)
 }
 
+val extensionBuildId = providers.gradleProperty("build.id").get()
+val extensionVersion = project.version.toString()
+
 java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
     toolchain {
         languageVersion.set(JavaLanguageVersion.of(providers.gradleProperty("java.toolchain.version").get().toInt()))
     }
@@ -67,12 +45,14 @@ kotlin {
     compilerOptions {
         apiVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_4)
         languageVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_4)
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
         freeCompilerArgs.addAll(
             "-Xjsr305=strict"
         )
     }
 }
+
+val packagedExtensionJar = tasks.named<AbstractArchiveTask>("shadowJar")
 
 application {
     mainClass.set("net.portswigger.mcp.ExtensionBase")
@@ -104,6 +84,7 @@ tasks {
                 mapOf(
                     "Implementation-Title" to project.name,
                     "Implementation-Version" to project.version,
+                    "Build-Id" to extensionBuildId,
                     "Implementation-Vendor" to "PortSwigger",
                     "Built-By" to System.getProperty("user.name"),
                     "Built-Date" to Instant.now().toString(),
@@ -128,14 +109,6 @@ tasks {
         duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     }
 
-    register<EmbedProxyJarTask>("embedProxyJar") {
-        group = "build"
-        description = "Embeds the MCP proxy JAR into the shadow JAR"
-        dependsOn(shadowJar)
-        shadowJarFile.set(shadowJar.flatMap { it.archiveFile })
-        projectDir.set(layout.projectDirectory)
-    }
-
     build {
         dependsOn(shadowJar)
     }
@@ -144,6 +117,13 @@ tasks {
         isPreserveFileTimestamps = false
         isReproducibleFileOrder = true
     }
+}
+
+tasks.named<Test>("test") {
+    dependsOn(packagedExtensionJar)
+    systemProperty("burp.mcp.expectedVersion", extensionVersion)
+    systemProperty("burp.mcp.expectedBuildId", extensionBuildId)
+    systemProperty("burp.mcp.packagedJar", packagedExtensionJar.get().archiveFile.get().asFile.absolutePath)
 }
 
 tasks.wrapper {

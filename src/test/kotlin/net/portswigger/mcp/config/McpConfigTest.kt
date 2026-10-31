@@ -25,6 +25,8 @@ class McpConfigTest {
                 storage[key] as? Boolean ?: when (key) {
                     "enabled" -> true
                     "requireHttpRequestApproval" -> true
+                    "readOnlyMode" -> true
+                    "requireBearerToken" -> true
                     else -> false
                 }
             }
@@ -46,6 +48,30 @@ class McpConfigTest {
         }
 
         config = McpConfig(persistedObject, mockLogging)
+    }
+
+    @Test
+    fun `secure defaults enable read-only mode and persist a strong bearer token`() {
+        assertTrue(config.readOnlyMode)
+        assertTrue(config.requireBearerToken)
+        assertEquals(43, config.bearerToken.length)
+
+        val savedToken = config.bearerToken
+        val reloaded = McpConfig(persistedObject, mockLogging)
+        assertEquals(savedToken, reloaded.bearerToken)
+    }
+
+    @Test
+    fun `interception timeout is bounded and persisted`() {
+        assertEquals(60, config.interceptionTimeoutSeconds)
+        config.interceptionTimeoutSeconds = 90
+        assertEquals(90, config.interceptionTimeoutSeconds)
+        assertThrows(IllegalArgumentException::class.java) {
+            config.interceptionTimeoutSeconds = 121
+        }
+        assertEquals(90, config.interceptionTimeoutSeconds)
+        val reloaded = McpConfig(persistedObject, mockLogging)
+        assertEquals(90, reloaded.interceptionTimeoutSeconds)
     }
 
     @Test

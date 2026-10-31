@@ -1,5 +1,6 @@
 .gradle
 build/
+.mcp.json
 !gradle/wrapper/gradle-wrapper.jar
 !**/src/main/**/build/
 !**/src/test/**/build/
@@ -37,3 +38,14 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+
+build/
+.gradle/
+.idea/
+.env
+.env.*
+*.log
+*.har
+*.pcap
+*.pem
+*.key

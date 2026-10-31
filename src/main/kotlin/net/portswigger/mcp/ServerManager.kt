@@ -15,3 +15,10 @@ interface ServerManager {
     fun stop(callback: (ServerState) -> Unit)
     fun shutdown()
 }
+
+object McpServerRuntime {
+    @Volatile var state: String = "stopped"
+    @Volatile var endpoint: String = "http://127.0.0.1:9876/mcp"
+    @Volatile var lastError: String? = null
+    @Volatile var bearerAuthenticationEnforced: Boolean = true
+}

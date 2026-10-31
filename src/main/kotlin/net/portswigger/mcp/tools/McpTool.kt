@@ -13,7 +13,17 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.serializer
 import net.portswigger.mcp.schema.asInputSchema
+import net.portswigger.mcp.security.ActivityLog
 import kotlin.experimental.ExperimentalTypeInference
+
+class McpToolError(val publicMessage: String) : RuntimeException(publicMessage)
+
+object ToolCatalog {
+    private val tools = java.util.concurrent.ConcurrentSkipListSet<String>()
+    fun clear() = tools.clear()
+    fun register(name: String) { tools.add(name) }
+    fun names(): List<String> = tools.toList()
+}
 
 @OptIn(InternalSerializationApi::class)
 inline fun <reified I : Any> Server.mcpTool(
@@ -25,26 +35,30 @@ inline fun <reified I : Any> Server.mcpTool(
     val inputSchema = I::class.asInputSchema()
 
     val handler: suspend (ClientConnection, CallToolRequest) -> CallToolResult = { _, request ->
+        ActivityLog.record(toolName, "called")
         try {
-            CallToolResult(
-                content = execute(
-                    Json.decodeFromJsonElement(
-                        serializer,
-                        request.params.arguments ?: JsonObject(emptyMap())
-                    )
-                ),
-                isError = false
-            )
+            val arguments = request.params.arguments ?: JsonObject(emptyMap())
+            require(Json.encodeToString(arguments).length <= 2_000_000) { "Tool input exceeds the 2 MB limit" }
+            val input = Json.decodeFromJsonElement(serializer, arguments)
+            if (input is Paginated) {
+                require(input.count in 1..100) { "count must be between 1 and 100" }
+                require(input.offset >= 0) { "offset must be zero or greater" }
+            }
+            val result = execute(input)
+            ActivityLog.record(toolName, "success")
+            CallToolResult(content = result, isError = false)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            ActivityLog.record(toolName, "error", e.javaClass.simpleName)
             CallToolResult(
-                content = listOf(TextContent("Error: ${e.message}")),
+                content = listOf(TextContent((e as? McpToolError)?.publicMessage ?: "Tool failed (${e.javaClass.simpleName}). Check the Burp MCP activity log for details.")),
                 isError = true
             )
         }
     }
 
+    ToolCatalog.register(toolName)
     addTool(name = toolName, description = description, inputSchema = inputSchema, handler = handler)
 }
 
@@ -120,8 +134,19 @@ inline fun Server.mcpTool(
     crossinline execute: suspend () -> List<ContentBlock>
 ) {
     val handler: suspend (ClientConnection, CallToolRequest) -> CallToolResult = { _, _ ->
-        CallToolResult(content = execute(), isError = false)
+        ActivityLog.record(name, "called")
+        try {
+            val result = execute()
+            ActivityLog.record(name, "success")
+            CallToolResult(content = result, isError = false)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            ActivityLog.record(name, "error", e.javaClass.simpleName)
+            CallToolResult(content = listOf(TextContent((e as? McpToolError)?.publicMessage ?: "Tool failed (${e.javaClass.simpleName}). Check the Burp MCP activity log for details.")), isError = true)
+        }
     }
+    ToolCatalog.register(name)
     addTool(name = name, description = description, inputSchema = ToolSchema(), handler = handler)
 }
 
@@ -131,8 +156,19 @@ inline fun Server.mcpTool(
     crossinline execute: suspend () -> String
 ) {
     val handler: suspend (ClientConnection, CallToolRequest) -> CallToolResult = { _, _ ->
-        CallToolResult(content = listOf(TextContent(execute())), isError = false)
+        ActivityLog.record(name, "called")
+        try {
+            val result = execute()
+            ActivityLog.record(name, "success")
+            CallToolResult(content = listOf(TextContent(result)), isError = false)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            ActivityLog.record(name, "error", e.javaClass.simpleName)
+            CallToolResult(content = listOf(TextContent((e as? McpToolError)?.publicMessage ?: "Tool failed (${e.javaClass.simpleName}). Check the Burp MCP activity log for details.")), isError = true)
+        }
     }
+    ToolCatalog.register(name)
     addTool(name = name, description = description, inputSchema = ToolSchema(), handler = handler)
 }
 
