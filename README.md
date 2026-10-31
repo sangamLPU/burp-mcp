@@ -138,6 +138,8 @@ The extension exposes connection/project status; filtered Proxy history and Site
 
 `.\gradlew.bat test` runs automated mock-backed tests and local MCP transport integration tests, including initialization, tool listing, input validation, permission checks, redaction, and parsing. The tests do not connect to a live Burp instance. A live Burp verification is the local-request procedure above; do not treat mock test success as proof of compatibility with every Burp release or edition.
 
+The practical live-edit checks completed against Burp Suite Professional 2024.1.1.1 and MCP extension v1.3.1 are recorded in [Live interception test results](docs/LIVE_INTERCEPTION_TEST_RESULTS.md). They verified approved POST JSON editing, a dedicated test-cookie edit, a `Set-Cookie` response edit, and HTML response-body editing using only loopback traffic. The report separates HTTP delivery evidence from Burp History display and records the final user-confirmed browser-rendering pass.
+
 ## References
 
 - [PortSwigger Burp MCP Server](https://github.com/PortSwigger/mcp-server)

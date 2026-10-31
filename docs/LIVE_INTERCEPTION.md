@@ -62,6 +62,8 @@ The original `set_proxy_intercept_state` tool and all other original tool names 
 
 ## Verification
 
+The live Burp practical checks for POST JSON, a test-only request cookie, `Set-Cookie`, and HTML body replacement all passed on Burp Suite Professional 2024.1.1.1. The sanitized server/client observations, exact-revision approval outcomes, limits, and user-confirmed Burp-browser rendering result are in [Live interception test results](LIVE_INTERCEPTION_TEST_RESULTS.md). These manual results are separate from the mocked automated tests below.
+
 Automated tests exercise real callback waiting with mocked Montoya handlers, request/response patches, approval invalidation, disclosure gating, scope revocation, expiry, interrupted callbacks, simultaneous decisions, cancellation, automatic heartbeat without MCP polling, maximum session lifetime and unload. MCP tests initialize over authenticated Streamable HTTP and discover the new tools. `DecisionQueueLocalHttpTest` verifies a loopback target against the explicit allowlist and mocked Burp scope, then sends a real local HTTP request only after an approved queue decision, holds/modifies its response and verifies drop prevents a second request. Its network is real; the harness is not an installed Burp Proxy.
 
 For a **live Burp** check, load this JAR, configure Proxy `127.0.0.1:8080`, scope `http://127.0.0.1:8000/live-check`, allowlist `127.0.0.1:8000`, read-only off, live edits on and hold timeout 120 seconds. Close other browser traffic, then run:
