@@ -56,7 +56,7 @@ class KtorServerManager(private val api: MontoyaApi, private val live: LiveInter
                 )
 
                 mcpServer.registerTools(api, config)
-                mcpServer.registerBurpApiTools(api, config)
+                mcpServer.registerBurpApiTools(api, config, live)
                 live?.let { mcpServer.registerInterceptionTools(it, api) }
 
                 server = embeddedServer(Netty, port = config.port, host = config.host) {

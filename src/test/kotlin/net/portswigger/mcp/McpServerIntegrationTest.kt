@@ -10,10 +10,19 @@ import io.ktor.client.HttpClient
 import io.ktor.client.plugins.sse.SSE
 import io.ktor.client.request.get
 import io.ktor.http.HttpStatusCode
+import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
@@ -180,6 +189,100 @@ class McpServerIntegrationTest {
             assertEquals(HttpStatusCode.Unauthorized, response.status)
         } finally {
             httpClient.close()
+        }
+    }
+
+    @Test
+    fun `eight concurrent read only status calls remain responsive`() = runBlocking {
+        val results = coroutineScope {
+            (1..8).map {
+                async { client.callTool("burp_get_status", mapOf("includeDiagnostics" to false)) }
+            }.awaitAll()
+        }
+        assertEquals(8, results.size)
+        results.forEach { assertReportedBuildIdentity(it, "burp_get_status") }
+    }
+
+    @Test
+    fun `one pending approval serializes a second and does not stall MCP health calls`() = runBlocking {
+        every { persistedObject.getBoolean("readOnlyMode") } returns false
+        config.readOnlyMode = false
+        config.addAutoApproveTarget("127.0.0.1:8000")
+        live.startApprovedSession(60)
+        every { api.scope().isInScope(any()) } returns true
+
+        val request = mockk<burp.api.montoya.http.message.requests.HttpRequest>(relaxed = true)
+        every { request.httpService().host() } returns "127.0.0.1"
+        every { request.httpService().port() } returns 8000
+        every { request.httpService().secure() } returns false
+        every { request.url() } returns "http://127.0.0.1:8000/test-cancel"
+        every { request.method() } returns "GET"
+        assertFalse(config.readOnlyMode)
+        assertTrue(live.health().enabled)
+        assertTrue(live.authorized(request))
+        val ticket = live.queue.offer(
+            "request",
+            net.portswigger.mcp.intercept.HeldMessage(request, request),
+            10_000
+        )!!
+        val secondTicket = live.queue.offer(
+            "request",
+            net.portswigger.mcp.intercept.HeldMessage(request, request),
+            10_000
+        )!!
+
+        mockkObject(net.portswigger.mcp.config.Dialogs)
+        try {
+            val promptStarted = CompletableDeferred<Unit>()
+            coEvery {
+                net.portswigger.mcp.config.Dialogs.requestOption(any(), any(), any(), any(), any(), any())
+            } coAnswers {
+                promptStarted.complete(Unit)
+                delay(400)
+                0
+            }
+
+            val approval = async {
+                client.callTool(
+                    "burp_approve_intercepted_request_edit",
+                    mapOf("id" to ticket.id, "revision" to 0)
+                )
+            }
+            val promptObserved = withTimeoutOrNull(2_000) {
+                promptStarted.await()
+                true
+            } == true
+            if (!promptObserved) {
+                val result = withTimeoutOrNull(1_000) { approval.await() }
+                val detail = result?.content?.joinToString(" ") { it.toString() }?.take(256)
+                val events = net.portswigger.mcp.security.ActivityLog.snapshot().take(8)
+                    .joinToString(" | ") { "${it.action}:${it.outcome}:${it.detail}" }
+                throw AssertionError("Approval did not reach its local review prompt; completed=${approval.isCompleted} error=${result?.isError} detail=$detail events=$events")
+            }
+
+            val simultaneousApproval = withTimeout(1_500) {
+                client.callTool(
+                    "burp_approve_intercepted_request_edit",
+                    mapOf("id" to secondTicket.id, "revision" to 0)
+                )
+            }
+            assertTrue(simultaneousApproval!!.isError == true, "A second concurrent local review must fail closed without opening another prompt")
+
+            val statuses = coroutineScope {
+                (1..8).map {
+                    async {
+                        withTimeout(1_500) {
+                            client.callTool("burp_get_status", mapOf("includeDiagnostics" to false))
+                        }
+                    }
+                }.awaitAll()
+            }
+            assertEquals(8, statuses.size)
+            statuses.forEach { assertReportedBuildIdentity(it, "burp_get_status") }
+            assertFalse(approval.await()!!.isError == true)
+            assertEquals(0, live.queue.get(ticket.id).approvedRevision)
+        } finally {
+            unmockkObject(net.portswigger.mcp.config.Dialogs)
         }
     }
 

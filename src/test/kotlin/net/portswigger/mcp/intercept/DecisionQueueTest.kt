@@ -2,6 +2,7 @@ package net.portswigger.mcp.intercept
 
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import net.portswigger.mcp.security.ActivityLog
@@ -103,5 +104,59 @@ class DecisionQueueTest {
             waiting.forEach { assertNull(it.get(1,TimeUnit.SECONDS)) }
             all.forEach { assertThrows(IllegalStateException::class.java) { q.get(it.id) } }
         } finally { pool.shutdownNow() }
+    }
+
+    @Test fun `concurrent 1 2 4 and 8 message queues keep identities revisions and decisions independent`() {
+        val pool = Executors.newFixedThreadPool(8)
+        try {
+            for (count in listOf(1, 2, 4, 8)) {
+                val queue = DecisionQueue<String>(8)
+                val start = CountDownLatch(1)
+                val submitted = (0 until count).map { index ->
+                    pool.submit<DecisionQueue.Ticket<String>?> {
+                        check(start.await(2, TimeUnit.SECONDS))
+                        queue.offer("request", "original-$count-$index", 5_000)
+                    }
+                }
+                start.countDown()
+                val tickets = submitted.mapIndexed { index, future ->
+                    future.get(2, TimeUnit.SECONDS)
+                        ?: fail("Queue rejected message $index at concurrency $count")
+                }
+
+                assertEquals(count, tickets.map { it.id }.toSet().size)
+                assertEquals(count, queue.list("request").size)
+                if (count == 8) assertNull(queue.offer("request", "overflow", 5_000))
+
+                tickets.forEachIndexed { index, originalTicket ->
+                    assertEquals(originalTicket.id, queue.get(originalTicket.id).id)
+                    val revised = "revised-$count-$index"
+                    val revision = queue.propose(originalTicket.id, 0, revised)
+                    assertEquals(1, revision)
+                    queue.approve(originalTicket.id, revision)
+                }
+                tickets.forEachIndexed { index, ticket ->
+                    queue.forward(ticket.id, 1)
+                    assertEquals("revised-$count-$index", ticket.result.get(1, TimeUnit.SECONDS))
+                }
+                assertTrue(queue.list("request").isEmpty())
+            }
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test fun `mode expiry revokes only unattended approvals and leaves human approvals intact`() {
+        val q = DecisionQueue<String>()
+        val unattended = q.offer("request", "synthetic", 5_000)!!
+        val human = q.offer("request", "manual", 5_000)!!
+        q.approve(unattended.id, 0, UnattendedLocalTestMode.AUTO_APPROVAL_SOURCE)
+        q.approve(human.id, 0, "HUMAN")
+
+        assertEquals(1, q.revokeApprovals(UnattendedLocalTestMode.AUTO_APPROVAL_SOURCE))
+        assertNull(q.get(unattended.id).approvedRevision)
+        assertNull(q.get(unattended.id).approvedBy)
+        assertEquals(0, q.get(human.id).approvedRevision)
+        assertEquals("HUMAN", q.get(human.id).approvedBy)
     }
 }

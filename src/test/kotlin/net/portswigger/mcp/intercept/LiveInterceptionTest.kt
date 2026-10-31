@@ -4,10 +4,12 @@ import burp.api.montoya.MontoyaApi
 import burp.api.montoya.core.Registration
 import burp.api.montoya.http.message.requests.HttpRequest
 import burp.api.montoya.http.message.responses.HttpResponse
+import burp.api.montoya.http.message.HttpHeader
 import burp.api.montoya.persistence.PersistedObject
 import burp.api.montoya.proxy.http.*
 import io.mockk.*
 import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.config.LocalTestTargets
 import net.portswigger.mcp.security.RequestRateLimiter
 import org.junit.jupiter.api.*
 import org.junit.jupiter.api.Assertions.*
@@ -33,6 +35,7 @@ class LiveInterceptionTest {
         every { storage.getString(any()) } answers { values[firstArg()] as? String }
         every { storage.getInteger(any()) } answers { values[firstArg()] as? Int }
         every { storage.setBoolean(any(),any()) } answers { values[firstArg()]=secondArg<Boolean>() }
+        every { storage.setString(any(),any()) } answers { values[firstArg()]=secondArg<String>() }
         every { storage.setInteger(any(),any()) } answers { values[firstArg()]=secondArg<Int>() }
         config=McpConfig(storage,api.logging())
         every { request.httpService().host() } returns "localhost"
@@ -130,6 +133,40 @@ class LiveInterceptionTest {
         assertFalse(metadata.urlPath.contains("private-value"))
     }
 
+    @Test fun `unattended credential gate scans arbitrary header and query values`() {
+        val opaqueHeader = mockk<HttpHeader>()
+        every { opaqueHeader.name() } returns "X-Test-Metadata"
+        every { opaqueHeader.value() } returns ("Bearer " + "synthetic-" + "secret-value")
+        every { request.headers() } returns listOf(opaqueHeader)
+        every { request.body().getBytes() } returns ByteArray(0)
+        every { request.url() } returns "http://127.0.0.1:8000/test-cancel?case=local-1"
+        assertTrue(live.hasSensitiveContent(request, request))
+
+        every { request.headers() } returns emptyList()
+        every { request.url() } returns ("http://127.0.0.1:8000/test-cancel?note=Bearer%20" + "synthetic-secret-value")
+        assertTrue(live.hasSensitiveContent(request, request))
+
+        every { opaqueHeader.value() } returns "eyJabcdefghijk.abcdefghijk.abcdefghijk"
+        every { request.headers() } returns listOf(opaqueHeader)
+        every { request.url() } returns "http://127.0.0.1:8000/test-cancel?case=local-1"
+        assertTrue(live.hasSensitiveContent(request, request))
+
+        every { request.headers() } returns emptyList()
+        every { request.url() } returns "http://127.0.0.1:8000/test-cancel?note=eyJabcdefghijk.abcdefghijk.abcdefghijk"
+        assertTrue(live.hasSensitiveContent(request, request))
+
+        val encodingHeader = mockk<HttpHeader>()
+        every { encodingHeader.name() } returns "Content-Encoding"
+        every { encodingHeader.value() } returns "gzip"
+        every { request.headers() } returns listOf(encodingHeader)
+        every { request.url() } returns "http://127.0.0.1:8000/test-cancel?case=local-1"
+        assertTrue(live.hasSensitiveContent(request, request))
+
+        every { request.url() } returns "http://127.0.0.1:8000/test-cancel?case=local-1"
+        every { request.headers() } returns emptyList()
+        assertFalse(live.hasSensitiveContent(request, request))
+    }
+
     @Test fun `remote drop waits for explicit local confirmation`() = runBlocking {
         mockkObject(Dialogs)
         val localDecision = CompletableDeferred<Int>()
@@ -155,6 +192,115 @@ class LiveInterceptionTest {
             localDecision.complete(1)
             unmockkObject(Dialogs)
         }
+    }
+
+    @Test fun `explicitly activated local mode auto drops only an identity-bound request`() = runBlocking {
+        val body = mockk<burp.api.montoya.core.ByteArray>(relaxed = true)
+        every { body.length() } returns 0
+        every { body.getBytes() } returns byteArrayOf()
+        every { request.body() } returns body
+        every { request.toByteArray().length() } returns 128
+        every { request.httpService().host() } returns LocalTestTargets.HOST
+        every { request.httpService().port() } returns LocalTestTargets.PORT
+        every { request.httpService().secure() } returns false
+        every { request.url() } returns "http://${LocalTestTargets.HOST}:${LocalTestTargets.PORT}/test-cancel"
+        every { request.method() } returns "GET"
+        every { request.path() } returns "/test-cancel"
+        config.autoApproveTargets = LocalTestTargets.ALLOWLIST_ENTRY
+        live.disable("TEST_SETUP")
+        live.activateUnattendedLocalTestMode(60)
+        val identity = live.unattendedSnapshot()
+        live.startApprovedSession(60)
+        val requestHeaders = listOf(
+            "Host" to "127.0.0.1:8000",
+            "X-MCP-Test-Run" to identity.testRunId!!,
+            "X-MCP-Server-Identity" to identity.serverIdentity!!,
+            "X-MCP-Test-ID" to "phase4a-case-1"
+        ).map { (name, value) ->
+            mockk<HttpHeader>().also { header ->
+                every { header.name() } returns name
+                every { header.value() } returns value
+            }
+        }
+        every { request.headers() } returns requestHeaders
+        val callback = pool.submit<ProxyRequestReceivedAction> {
+            requestHandler.captured.handleRequestReceived(request)
+        }
+        val ticket = pending("request")
+
+        val edited = mockk<HttpRequest>(relaxed = true)
+        every { edited.httpService() } returns request.httpService()
+        every { edited.url() } returns "http://${LocalTestTargets.HOST}:${LocalTestTargets.PORT}/test-html"
+        every { edited.method() } returns "GET"
+        every { edited.headers() } returns requestHeaders
+        every { edited.body() } returns body
+        every { edited.toByteArray().length() } returns 128
+        every { request.withPath("/test-html") } returns edited
+        live.allowEdits = true
+        assertEquals(1, live.propose(ticket.id, "request", 0, emptyMap(), emptyList(), null, "/test-html"))
+
+        live.dropWithLocalApproval(ticket.id, "request")
+
+        assertSame(requestDropped, callback.get(2, TimeUnit.SECONDS))
+        assertTrue(live.queue.list("request").isEmpty())
+        assertTrue(net.portswigger.mcp.security.ActivityLog.snapshot().any {
+            it.action == "unattended_local_test" && it.outcome == "auto_approved" &&
+                it.detail.contains("/test-html") && it.detail.contains(ticket.id)
+        })
+    }
+
+    @Test fun `unattended mode rejects an out of policy proposed request path`() = runBlocking {
+        val body = mockk<burp.api.montoya.core.ByteArray>(relaxed = true)
+        every { body.length() } returns 0
+        every { body.getBytes() } returns byteArrayOf()
+        every { request.body() } returns body
+        every { request.toByteArray().length() } returns 128
+        every { request.httpService().host() } returns LocalTestTargets.HOST
+        every { request.httpService().port() } returns LocalTestTargets.PORT
+        every { request.httpService().secure() } returns false
+        every { request.url() } returns "http://${LocalTestTargets.HOST}:${LocalTestTargets.PORT}/test-cancel"
+        every { request.method() } returns "GET"
+        every { request.path() } returns "/test-cancel"
+        config.autoApproveTargets = LocalTestTargets.ALLOWLIST_ENTRY
+        live.disable("TEST_SETUP")
+        live.activateUnattendedLocalTestMode(60)
+        val identity = live.unattendedSnapshot()
+        live.startApprovedSession(60)
+        val requestHeaders = listOf(
+            "Host" to "127.0.0.1:8000",
+            "X-MCP-Test-Run" to identity.testRunId!!,
+            "X-MCP-Server-Identity" to identity.serverIdentity!!,
+            "X-MCP-Test-ID" to "phase4a-edit-case"
+        ).map { (name, value) ->
+            mockk<HttpHeader>().also { header ->
+                every { header.name() } returns name
+                every { header.value() } returns value
+            }
+        }
+        every { request.headers() } returns requestHeaders
+
+        val edited = mockk<HttpRequest>(relaxed = true)
+        every { edited.httpService() } returns request.httpService()
+        every { edited.url() } returns "http://${LocalTestTargets.HOST}:${LocalTestTargets.PORT}/outside"
+        every { edited.method() } returns "GET"
+        every { edited.headers() } returns requestHeaders
+        every { edited.body() } returns body
+        every { edited.toByteArray().length() } returns 128
+        every { request.withPath("/outside") } returns edited
+        live.allowEdits = true
+
+        val callback = pool.submit<ProxyRequestReceivedAction> {
+            requestHandler.captured.handleRequestReceived(request)
+        }
+        val ticket = pending("request")
+        assertThrows(IllegalStateException::class.java) {
+            live.propose(ticket.id, "request", 0, emptyMap(), emptyList(), null, "/outside")
+        }
+        assertEquals(0, live.queue.get(ticket.id).revision, "an ineligible unattended edit must not mutate the queue")
+        assertTrue(live.queue.get(ticket.id).proposed == null)
+        assertFalse(callback.isDone)
+        live.disable("TEST_CLEANUP")
+        assertSame(requestDropped, callback.get(2, TimeUnit.SECONDS))
     }
 
     @Test fun `disclosure request returns immediately and keeps the same ID until local approval`() = runBlocking {

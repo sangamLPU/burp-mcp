@@ -1,6 +1,7 @@
 package net.portswigger.mcp.intercept
 
 import net.portswigger.mcp.config.Design
+import net.portswigger.mcp.config.LocalTestTargets
 import net.portswigger.mcp.security.ActivityLog
 import java.awt.BorderLayout
 import java.awt.Dimension
@@ -16,6 +17,24 @@ import javax.swing.*
 class InterceptionPanel(private val live: LiveInterception) : JPanel(BorderLayout(Design.Spacing.SM, Design.Spacing.SM)) {
     private val mode = JCheckBox("Live interception (local approval required)")
     private val edits = JCheckBox("Allow AI edit proposals")
+    private val unattendedDuration = JSpinner(SpinnerNumberModel(
+        UnattendedLocalTestMode.DEFAULT_DURATION_SECONDS,
+        UnattendedLocalTestMode.MIN_DURATION_SECONDS,
+        UnattendedLocalTestMode.MAX_DURATION_SECONDS,
+        30
+    ))
+    private val unattendedStatus = JTextArea(7, 54).apply {
+        isEditable = false
+        isFocusable = false
+        lineWrap = true
+        wrapStyleWord = true
+        isOpaque = false
+        font = Design.Typography.bodyMedium
+        foreground = Design.Colors.onSurfaceVariant
+        border = BorderFactory.createEmptyBorder()
+    }
+    private val unattendedButton = JButton("Enable Unattended Local Test Mode")
+    private val unattendedEmergencyButton = JButton("Emergency stop unattended mode and interception")
     private val statusText = JTextArea(4, 54).apply {
         isEditable = false
         isFocusable = false
@@ -92,6 +111,24 @@ class InterceptionPanel(private val live: LiveInterception) : JPanel(BorderLayou
         }
         edits.addActionListener { live.allowEdits = edits.isSelected }
         add(createStatusAndControls(), BorderLayout.NORTH)
+
+        unattendedButton.addActionListener {
+            runCatching {
+                val snapshot = live.unattendedSnapshot()
+                if (snapshot.active) {
+                    live.deactivateUnattendedLocalTestMode("LOCAL_UI_DISABLED")
+                } else {
+                    live.activateUnattendedLocalTestMode(unattendedDuration.value as Int)
+                }
+            }.onFailure { error ->
+                JOptionPane.showMessageDialog(this, error.message, "Unattended local test mode", JOptionPane.ERROR_MESSAGE)
+            }
+            refresh()
+        }
+        unattendedEmergencyButton.addActionListener {
+            live.emergencyStopUnattendedLocalTestMode()
+            refresh()
+        }
 
         val queueScroll = JScrollPane(list).apply {
             minimumSize = Dimension(0, 120)
@@ -177,6 +214,10 @@ class InterceptionPanel(private val live: LiveInterception) : JPanel(BorderLayou
         c.gridy = 1
         container.add(edits, c)
 
+        c.gridy = 2
+        c.insets = Insets(Design.Spacing.SM, 0, Design.Spacing.SM, 0)
+        container.add(createUnattendedModePanel(), c)
+
         val timing = JPanel(GridBagLayout()).apply {
             isOpaque = false
             val pair = GridBagConstraints().apply {
@@ -205,13 +246,52 @@ class InterceptionPanel(private val live: LiveInterception) : JPanel(BorderLayou
         }
         sessionLifetime.addChangeListener { live.setConfiguredSessionLifetime(sessionLifetime.value as Int) }
         holdTimeout.addChangeListener { live.setTimeout(holdTimeout.value as Int) }
-        c.gridy = 2
+        c.gridy = 3
         container.add(timing, c)
 
-        c.gridy = 3
+        c.gridy = 4
         c.insets = Insets(Design.Spacing.SM, 0, 0, 0)
         container.add(statusText, c)
         return container
+    }
+
+    private fun createUnattendedModePanel(): JPanel = JPanel(GridBagLayout()).apply {
+        isOpaque = true
+        background = Design.Colors.surface
+        border = BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(Design.Colors.outlineVariant, 1),
+            BorderFactory.createEmptyBorder(Design.Spacing.SM, Design.Spacing.SM, Design.Spacing.SM, Design.Spacing.SM)
+        )
+        val c = GridBagConstraints().apply {
+            gridx = 0
+            weightx = 1.0
+            fill = GridBagConstraints.HORIZONTAL
+            anchor = GridBagConstraints.WEST
+            insets = Insets(0, 0, Design.Spacing.SM, 0)
+        }
+        c.gridy = 0
+        add(JLabel("OPT-IN UNATTENDED LOCAL TEST MODE").apply {
+            font = Design.Typography.titleMedium
+            foreground = Design.Colors.onSurface
+        }, c)
+        c.gridy = 1
+        add(unattendedStatus, c)
+
+        val durationRow = JPanel(GridBagLayout()).apply {
+            isOpaque = false
+            val d = GridBagConstraints().apply { anchor = GridBagConstraints.WEST; insets = Insets(0, 0, 0, Design.Spacing.SM) }
+            d.gridx = 0
+            add(JLabel("Authorization duration (seconds):"), d)
+            d.gridx = 1
+            unattendedDuration.toolTipText = "Defaults to ${UnattendedLocalTestMode.DEFAULT_DURATION_SECONDS}s; never exceeds ${UnattendedLocalTestMode.MAX_DURATION_SECONDS}s and never renews automatically."
+            add(unattendedDuration, d)
+        }
+        c.gridy = 2
+        add(durationRow, c)
+        c.gridy = 3
+        add(unattendedButton, c)
+        c.gridy = 4
+        add(unattendedEmergencyButton, c)
     }
 
     private fun syncMode(enabled: Boolean) {
@@ -251,6 +331,7 @@ class InterceptionPanel(private val live: LiveInterception) : JPanel(BorderLayou
 
     private fun refresh() {
         val health = live.health()
+        val unattended = live.unattendedSnapshot()
         val requests = live.queue.list("request")
         val responses = live.queue.list("response")
         val all = requests + responses
@@ -268,6 +349,29 @@ class InterceptionPanel(private val live: LiveInterception) : JPanel(BorderLayou
             ActivityLog.snapshot().firstOrNull()?.let { event ->
                 append("\nLast queue event: ${event.timestamp} ${event.action} ${event.outcome} ${event.detail}")
             }
+        }
+
+        unattendedButton.text = if (unattended.active) "Disable Unattended Local Test Mode" else "Enable Unattended Local Test Mode"
+        unattendedEmergencyButton.isEnabled = unattended.active || health.enabled
+        unattendedStatus.text = buildString {
+            if (unattended.active) {
+                append("ACTIVE — ${unattended.remainingMillis / 1000}s remain; expires automatically without renewal.")
+                append("\nAuthorized destination: http://${LocalTestTargets.HOST}:${LocalTestTargets.PORT}")
+                append("\nExact paths: ${LocalTestTargets.paths.joinToString(", ")}")
+                append("\nMethods: GET, POST, PUT, PATCH, DELETE. Max 2 concurrent messages, 8 queued, 32 test cases per activation, 64 KiB payload.")
+                append("\nAutomatic gates: local test session start/stop, predefined scope helper, exact-revision synthetic request/response approval and forwarding, local request drop, and synthetic content disclosure.")
+                append("\nRun ID: ${unattended.testRunId}")
+                append("\nEphemeral server identity (send as X-MCP-Server-Identity): ${unattended.serverIdentity}")
+            } else {
+                append("DISABLED. No approvals are automatic. Extension reload and expiry leave this mode off.")
+                append("\nDestination: http://${LocalTestTargets.HOST}:${LocalTestTargets.PORT}")
+                append("\nExact paths: ${LocalTestTargets.paths.joinToString(", ")}")
+                append("\nMethods: GET, POST, PUT, PATCH, DELETE. Max ${UnattendedLocalTestMode.MAX_CONCURRENT_MESSAGES} concurrent messages, ${UnattendedLocalTestMode.MAX_PENDING_MESSAGES} queued, ${UnattendedLocalTestMode.MAX_REQUESTS_PER_RUN} test cases, ${UnattendedLocalTestMode.MAX_PAYLOAD_BYTES} byte payload.")
+                append("\nPermitted automatic gates: start/stop the restricted local interception session, configure only the predefined scope, approve/forward exact synthetic request or response revisions, drop a local synthetic request, and disclose synthetic test content.")
+                append("\nSelected duration: ${unattendedDuration.value}s; default ${UnattendedLocalTestMode.DEFAULT_DURATION_SECONDS}s; hard maximum ${UnattendedLocalTestMode.MAX_DURATION_SECONDS}s.")
+            }
+            append("\nOnly 127.0.0.1:8000 and the nine listed paths may qualify. Requests need matching X-MCP-Test-Run, X-MCP-Server-Identity and X-MCP-Test-ID values, an exact Host header, Burp scope and MCP allowlist. Credential or cookie data always requires manual review.")
+            append("\nWarning: while ACTIVE, qualifying local synthetic traffic may be disclosed, edited, forwarded or dropped without individual confirmation. The activation button is the human authorization; emergency stop disables this mode and cancels the interception session.")
         }
 
         val next = all.joinToString {

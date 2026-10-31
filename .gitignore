@@ -49,3 +49,4 @@ build/
 *.pcap
 *.pem
 *.key
+__pycache__/

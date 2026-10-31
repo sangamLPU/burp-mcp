@@ -20,6 +20,10 @@ import kotlinx.serialization.json.Json
 import net.portswigger.mcp.compat.MontoyaRuntimeCompat
 import net.portswigger.mcp.McpServerRuntime
 import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.config.LocalTestTargets
+import net.portswigger.mcp.intercept.LiveInterception
+import net.portswigger.mcp.intercept.LocalTestManagementOperation
+import net.portswigger.mcp.intercept.LocalTestPolicyDecision
 import net.portswigger.mcp.schema.toSerializableForm
 import net.portswigger.mcp.security.ActivityLog
 import net.portswigger.mcp.security.DataAccessSecurity
@@ -37,20 +41,11 @@ import java.util.concurrent.ConcurrentHashMap
 private const val MAX_PAGE_SIZE = 25
 private const val MAX_SITE_MAP_PAGE_SIZE = 25
 private const val DEFAULT_RESPONSE_TIMEOUT_MS = 10_000L
-private const val LOCAL_TEST_TARGET_ALLOWLIST = "127.0.0.1:8000"
-private val LOCAL_TEST_SCOPE_URLS = listOf(
-    "http://127.0.0.1:8000/test-html",
-    "http://127.0.0.1:8000/test-post",
-    "http://127.0.0.1:8000/test-form",
-    "http://127.0.0.1:8000/test-upload",
-    "http://127.0.0.1:8000/test-cancel",
-    "http://127.0.0.1:8000/test-timeout",
-    "http://127.0.0.1:8000/test-session-expiry",
-    "http://127.0.0.1:8000/test-concurrent-a",
-    "http://127.0.0.1:8000/test-concurrent-b"
-)
-
-fun io.modelcontextprotocol.kotlin.sdk.server.Server.registerBurpApiTools(api: MontoyaApi, config: McpConfig) {
+fun io.modelcontextprotocol.kotlin.sdk.server.Server.registerBurpApiTools(
+    api: MontoyaApi,
+    config: McpConfig,
+    live: LiveInterception? = null
+) {
     mcpTool<BurpGetStatus>("Returns the Burp MCP server state, endpoint, safety mode, and authentication status. Does not expose the bearer token.") {
         Json.encodeToString(
             StatusResult(
@@ -116,35 +111,65 @@ fun io.modelcontextprotocol.kotlin.sdk.server.Server.registerBurpApiTools(api: M
 
     mcpTool(
         "burp_configure_local_test_scope",
-        "Adds only the fixed 127.0.0.1:8000 synthetic test endpoints to Burp Target scope and the explicit host allowlist after one-time local Burp confirmation. This does not disable read-only mode, scope checks, or per-request approvals."
+        "Adds only the nine fixed 127.0.0.1:8000 synthetic test endpoints to Burp Target scope and the explicit host allowlist. Requires local confirmation unless the operator has explicitly enabled the bounded Unattended Local Test Mode in Burp."
     ) {
         val details = buildString {
-            appendLine("Include these exact local test URLs in Burp Target scope:")
-            LOCAL_TEST_SCOPE_URLS.forEach(::appendLine)
-            append("Add only $LOCAL_TEST_TARGET_ALLOWLIST to the Burp MCP authorized-host allowlist.")
+        appendLine("Include these exact local test URLs in Burp Target scope:")
+        LocalTestTargets.urls.forEach(::appendLine)
+        append("Add only ${LocalTestTargets.ALLOWLIST_ENTRY} to the Burp MCP authorized-host allowlist.")
         }
-        if (!StateChangeSecurity.confirm(api, config, "Configure localhost test scope", details)) {
+        val unattendedDecision = live?.unattendedManagementDecision(LocalTestManagementOperation.CONFIGURE_LOCAL_SCOPE)
+        val locallyApproved = unattendedDecision?.decision == LocalTestPolicyDecision.AUTO_APPROVE ||
+            StateChangeSecurity.confirm(api, config, "Configure localhost test scope", details)
+        if (!locallyApproved) {
             ActivityLog.record("configure_local_test_scope", "denied")
             return@mcpTool "Denied: local Burp confirmation was not approved."
         }
 
         val scope = api.scope()
-        LOCAL_TEST_SCOPE_URLS.forEach { url ->
-            if (!scope.isInScope(url)) scope.includeInScope(url)
+        val includeFailures = mutableListOf<String>()
+        LocalTestTargets.urls.forEachIndexed { index, url ->
+            try {
+                if (!scope.isInScope(url)) scope.includeInScope(url)
+            } catch (error: Exception) {
+                includeFailures += "endpoint-${index + 1}:${error.javaClass.simpleName}"
+            }
         }
-        check(LOCAL_TEST_SCOPE_URLS.all(scope::isInScope)) {
-            "Burp did not confirm every fixed localhost test URL in scope; the allowlist was not changed."
+        val inScopeChecks = LocalTestTargets.urls.map { url ->
+            runCatching { scope.isInScope(url) }.getOrDefault(false)
         }
-
-        config.addAutoApproveTarget(LOCAL_TEST_TARGET_ALLOWLIST)
-        check(HttpRequestSecurity.isAllowedByHostAllowlist("127.0.0.1", 8000, config)) {
-            "The localhost test host could not be added to the authorized-host allowlist."
+        val burpScopeComplete = inScopeChecks.all { it }
+        val allowlistChanged = if (burpScopeComplete) {
+            config.addAutoApproveTarget(LocalTestTargets.ALLOWLIST_ENTRY)
+        } else false
+        val hostAllowlisted = HttpRequestSecurity.isAllowedByHostAllowlist(
+            LocalTestTargets.HOST, LocalTestTargets.PORT, config
+        )
+        val configurationComplete = burpScopeComplete && hostAllowlisted
+        if (!configurationComplete) {
+            ActivityLog.record(
+                "configure_local_test_scope", "partial",
+                "endpointCount=${LocalTestTargets.urls.size} inBurpScope=${inScopeChecks.count { it }} " +
+                    "hostAllowlisted=$hostAllowlisted includeFailures=${includeFailures.size}"
+            )
+        } else {
+            ActivityLog.record("configure_local_test_scope", "configured", "endpointCount=${LocalTestTargets.urls.size}")
         }
-        ActivityLog.record("configure_local_test_scope", "configured", "endpointCount=${LOCAL_TEST_SCOPE_URLS.size}")
         Json.encodeToString(
             LocalTestScopeResult(
-                targetAllowlist = LOCAL_TEST_TARGET_ALLOWLIST,
-                checks = LOCAL_TEST_SCOPE_URLS.map { url -> LocalTestScopeCheck(url, scope.isInScope(url)) }
+                targetAllowlist = LocalTestTargets.ALLOWLIST_ENTRY,
+                configurationComplete = configurationComplete,
+                allowlistAdded = allowlistChanged,
+                failureSummary = when {
+                    configurationComplete -> null
+                    includeFailures.isNotEmpty() -> "Burp scope inclusion failed for ${includeFailures.joinToString(", ")}; the MCP allowlist was not changed unless already present."
+                    !burpScopeComplete -> "Burp did not confirm every predefined localhost URL; the MCP allowlist was not changed unless already present."
+                    else -> "The exact localhost MCP allowlist entry could not be verified."
+                },
+                checks = LocalTestTargets.urls.mapIndexed { index, url ->
+                    val inScope = inScopeChecks[index]
+                    LocalTestScopeCheck(url, inBurpScope = inScope, hostAllowlisted = hostAllowlisted, eligible = inScope && hostAllowlisted)
+                }
             )
         )
     }
@@ -657,8 +682,14 @@ private object ScanRegistry {
 @Serializable private data class ProjectInfoResult(val projectName: String?, val projectId: String?, val available: Boolean, val reason: String?)
 @Serializable private data class ScopeCheck(val url: String, val inBurpScope: Boolean, val hostAllowlisted: Boolean, val eligible: Boolean)
 @Serializable private data class ScopeResult(val scopeRulesEnumerated: Boolean, val note: String, val checks: List<ScopeCheck>)
-@Serializable private data class LocalTestScopeCheck(val url: String, val inBurpScope: Boolean)
-@Serializable private data class LocalTestScopeResult(val targetAllowlist: String, val checks: List<LocalTestScopeCheck>)
+@Serializable private data class LocalTestScopeCheck(val url: String, val inBurpScope: Boolean, val hostAllowlisted: Boolean, val eligible: Boolean)
+@Serializable private data class LocalTestScopeResult(
+    val targetAllowlist: String,
+    val configurationComplete: Boolean,
+    val allowlistAdded: Boolean,
+    val failureSummary: String?,
+    val checks: List<LocalTestScopeCheck>
+)
 @Serializable private data class ConnectionResult(val burpConnected: Boolean, val serverState: String, val endpoint: String, val burpVersion: String?)
 @Serializable private data class HistoryEntry(val historyId: Int, val timestamp: String, val url: String, val method: String, val statusCode: Int?, val contentType: String?, val request: String, val response: String, val contentTrust: String)
 @Serializable private data class SiteMapEntry(val url: String, val method: String, val statusCode: Int?, val request: String, val response: String, val contentTrust: String)

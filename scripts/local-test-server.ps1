@@ -4,10 +4,26 @@ param(
     [ValidateRange(1, 1048576)] [int]$MaxBodyBytes = 1048576,
     [ValidateRange(1, 60)] [int]$RequestTimeoutSeconds = 10,
     [ValidateRange(1, 86400)] [int]$MaxRunSeconds = 1800,
-    [ValidateRange(0, 10000)] [int]$TimeoutDelayMilliseconds = 2000
+    [ValidateRange(0, 10000)] [int]$TimeoutDelayMilliseconds = 2000,
+    [switch]$IdentityFromEnvironment,
+    [string]$TestRunId = '',
+    [string]$ServerIdentity = ''
 )
 
 $ErrorActionPreference = 'Stop'
+if ($IdentityFromEnvironment) {
+    $TestRunId = [Environment]::GetEnvironmentVariable('BURP_TEST_RUN_ID', 'Process')
+    $ServerIdentity = [Environment]::GetEnvironmentVariable('BURP_TEST_SERVER_IDENTITY', 'Process')
+}
+if ([string]::IsNullOrWhiteSpace($TestRunId) -xor [string]::IsNullOrWhiteSpace($ServerIdentity)) {
+    throw 'TestRunId and ServerIdentity must either both be supplied or both be empty.'
+}
+if ($TestRunId -and $TestRunId -notmatch '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$') {
+    throw 'TestRunId is malformed.'
+}
+if ($ServerIdentity -and $ServerIdentity -notmatch '^[A-Za-z0-9_-]{43}$') {
+    throw 'ServerIdentity is malformed.'
+}
 $LogPath = [System.IO.Path]::GetFullPath($LogPath)
 $logDirectory = Split-Path -Parent $LogPath
 New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
@@ -455,6 +471,48 @@ try {
             try { $requestBody = [System.Text.UTF8Encoding]::new($false, $true).GetString($bodyBytes) }
             catch { $requestBody = ''; $utf8BodyValid = $false }
 
+            if ($method -eq 'GET' -and $path -eq '/__phase4a-health' -and $contentLength -eq 0 -and $totalRead -eq 0) {
+                if ($TestRunId) {
+                    $healthIdentityMatches = $requestHeaders.ContainsKey('X-MCP-Test-Run') -and
+                        $requestHeaders['X-MCP-Test-Run'] -ceq $TestRunId -and
+                        $requestHeaders.ContainsKey('X-MCP-Server-Identity') -and
+                        $requestHeaders['X-MCP-Server-Identity'] -ceq $ServerIdentity -and
+                        $requestHeaders.ContainsKey('Host') -and
+                        $requestHeaders['Host'] -ceq '127.0.0.1:8000'
+                    if (-not $healthIdentityMatches) {
+                        Send-TestHttpResponse -Stream $stream -Status '403 Forbidden' -BodyBytes ([System.Text.Encoding]::ASCII.GetBytes('Synthetic health identity rejected'))
+                        continue
+                    }
+                }
+                $healthBody = [System.Text.Encoding]::ASCII.GetBytes('MCP_LOCAL_TEST_SERVER_READY')
+                $healthHeaders = @()
+                if ($TestRunId) {
+                    $healthHeaders = @(
+                        "X-MCP-Test-Run: $TestRunId",
+                        "X-MCP-Server-Identity: $ServerIdentity"
+                    )
+                }
+                Send-TestHttpResponse -Stream $stream -Status '200 OK' -ContentType 'text/plain; charset=us-ascii' -ExtraHeaders $healthHeaders -BodyBytes $healthBody
+                continue
+            }
+
+            if ($TestRunId) {
+                $allowedUnattendedPaths = @(
+                    '/test-html', '/test-post', '/test-form', '/test-upload', '/test-cancel',
+                    '/test-timeout', '/test-session-expiry', '/test-concurrent-a', '/test-concurrent-b'
+                )
+                $identityMatches = $requestHeaders.ContainsKey('X-MCP-Test-Run') -and
+                    $requestHeaders['X-MCP-Test-Run'] -ceq $TestRunId -and
+                    $requestHeaders.ContainsKey('X-MCP-Server-Identity') -and
+                    $requestHeaders['X-MCP-Server-Identity'] -ceq $ServerIdentity -and
+                    $requestHeaders.ContainsKey('Host') -and
+                    $requestHeaders['Host'] -ceq '127.0.0.1:8000'
+                if ($path -notin $allowedUnattendedPaths -or -not $identityMatches) {
+                    Send-TestHttpResponse -Stream $stream -Status '403 Forbidden' -BodyBytes ([System.Text.Encoding]::ASCII.GetBytes('Synthetic test identity or path rejected'))
+                    continue
+                }
+            }
+
             $postBodyVerified = $null
             if ($path -eq '/test-post') {
                 $postBodyVerified = $false
@@ -572,6 +630,7 @@ try {
             }
             $record = [ordered]@{
                 receivedAt = [DateTimeOffset]::Now.ToString('o')
+                testRunId = if ($TestRunId) { $TestRunId } else { $null }
                 method = $method
                 path = $loggedPath
                 contentLength = $contentLength

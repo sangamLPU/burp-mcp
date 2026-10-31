@@ -259,3 +259,25 @@ function Test-CancelInterceptionObservation {
         Checks = [pscustomobject]$checks
     }
 }
+
+function Test-CancelServerDeliveryEvidence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]]$Records,
+        [Parameter(Mandatory = $true)] [ValidatePattern('^phase4a-[0-9a-f]{32}$')] [string]$TestId
+    )
+
+    $testPathRecords = @($Records | Where-Object { $_.path -eq '/test-cancel' })
+    $matchingIdRecords = @($testPathRecords | Where-Object { $_.cancellationTestId -ceq $TestId })
+    $verifiedSingleDelivery = (
+        $matchingIdRecords.Count -eq 1 -and
+        $matchingIdRecords[0].cancellationTestIdVerified -eq $true -and
+        $matchingIdRecords[0].cancellationRequestVerified -eq $true
+    )
+    [pscustomobject]@{
+        ServerRequestsToTestPath = $testPathRecords.Count
+        MatchingTestIdRecords = $matchingIdRecords.Count
+        VerifiedSingleDelivery = $verifiedSingleDelivery
+        NoOriginDelivery = ($testPathRecords.Count -eq 0)
+    }
+}

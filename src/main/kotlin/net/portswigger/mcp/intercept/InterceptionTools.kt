@@ -52,7 +52,8 @@ fun Server.registerInterceptionTools(live: LiveInterception, api: MontoyaApi) {
             leaseRemainingMillis = health.leaseRemainingMillis,
             leaseExpiresAtEpochMillis = health.leaseExpiresAtEpochMillis,
             lastHeartbeatAtEpochMillis = health.lastHeartbeatAtEpochMillis,
-            sessionEndReason = health.sessionEndReason
+            sessionEndReason = health.sessionEndReason,
+            unattendedMode = live.unattendedSnapshot()
         ))
     }
     fun listing(kind: String): String { live.touch(); return Json.encodeToString(live.queue.list(kind).mapNotNull { runCatching { view(read(it.id,kind),false) }.getOrNull() }) }
@@ -113,25 +114,34 @@ fun Server.registerInterceptionTools(live: LiveInterception, api: MontoyaApi) {
         if (enabled) {
             val lifetime = sessionLifetimeSeconds ?: live.configuredSessionLifetimeSeconds
             live.validateSessionLifetime(lifetime)
-            check(StateChangeSecurity.confirm(
-                api, live.config, "Approve live interception session",
-                "Capture only requests already authorized by Burp scope and the explicit host allowlist. " +
-                    "Burp will keep the client lease alive automatically for $lifetime seconds (hard maximum " +
-                    "${LiveInterception.MAX_SESSION_LIFETIME_SECONDS} seconds). Held messages still drop at their own deadlines."
-            )) { "User denied live interception session" }
+            val unattendedDecision = live.unattendedManagementDecision(
+                LocalTestManagementOperation.START_SESSION,
+                requestedSessionLifetimeSeconds = lifetime
+            )
+            if (unattendedDecision.decision != LocalTestPolicyDecision.AUTO_APPROVE) {
+                check(StateChangeSecurity.confirm(
+                    api, live.config, "Approve live interception session",
+                    "Capture only requests already authorized by Burp scope and the explicit host allowlist. " +
+                        "Burp will keep the client lease alive automatically for $lifetime seconds (hard maximum " +
+                        "${LiveInterception.MAX_SESSION_LIFETIME_SECONDS} seconds). Held messages still drop at their own deadlines."
+                )) { "User denied live interception session" }
+            }
             live.startApprovedSession(lifetime)
         } else {
             val health = live.health()
             if (health.enabled) {
-                check(ApprovalTimeout.await("stop live interception") {
-                    Dialogs.requestOption(
-                        net.portswigger.mcp.security.findBurpFrame(),
-                        "Stop live interception? Any held request or response will be dropped.\n\n" +
-                            "Currently pending: ${health.pendingRequests} requests and ${health.pendingResponses} responses.",
-                        arrayOf("Stop and drop held traffic", "Keep session active"),
-                        title = "Confirm live interception stop"
-                    ) == 0
-                } == true) { "User denied or timed out stopping live interception" }
+                val unattendedDecision = live.unattendedManagementDecision(LocalTestManagementOperation.STOP_SESSION)
+                if (unattendedDecision.decision != LocalTestPolicyDecision.AUTO_APPROVE) {
+                    check(ApprovalTimeout.await("stop live interception") {
+                        Dialogs.requestOption(
+                            net.portswigger.mcp.security.findBurpFrame(),
+                            "Stop live interception? Any held request or response will be dropped.\n\n" +
+                                "Currently pending: ${health.pendingRequests} requests and ${health.pendingResponses} responses.",
+                            arrayOf("Stop and drop held traffic", "Keep session active"),
+                            title = "Confirm live interception stop"
+                        ) == 0
+                    } == true) { "User denied or timed out stopping live interception" }
+                }
             }
             live.disable()
         }
@@ -209,7 +219,8 @@ internal fun redactedDiff(original: String, proposed: String): String {
     val leaseRemainingMillis: Long,
     val leaseExpiresAtEpochMillis: Long?,
     val lastHeartbeatAtEpochMillis: Long?,
-    val sessionEndReason: String
+    val sessionEndReason: String,
+    val unattendedMode: UnattendedLocalTestSnapshot
 )
 @Serializable private data class InterceptDiagnostics(
     val enabled: Boolean,

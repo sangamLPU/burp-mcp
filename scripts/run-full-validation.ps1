@@ -113,7 +113,7 @@ try {
     $requiredPaths = @(
         'settings.gradle.kts', 'build.gradle.kts', 'gradle.properties', 'gradlew.bat',
         'src/main/kotlin', 'src/test/kotlin', 'scripts/local-test-server.ps1',
-        'scripts/test-local-server.ps1', 'scripts/test-cancel-validation.ps1'
+        'scripts/test-local-server.ps1', 'scripts/test-local-server-identity.ps1', 'scripts/test-cancel-validation.ps1'
     )
     $missingPaths = @($requiredPaths | Where-Object { -not (Test-Path -LiteralPath (Join-Path $repoRoot $_)) })
     if ($missingPaths.Count -eq 0) {
@@ -123,8 +123,48 @@ try {
     }
 
     $java = Get-Command java -ErrorAction SilentlyContinue
-    if ($null -ne $java) { Add-Result 'Java prerequisite' 'PASS' "Found $($java.Source)." }
-    else { Add-Result 'Java prerequisite' 'FAIL' 'java was not found on PATH.' }
+    $toolchainVersion = $null
+    if ($null -ne $java) {
+        $javaVersionProcess = $null
+        $javaVersionText = ''
+        try {
+            $javaVersionInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $javaVersionInfo.FileName = $java.Source
+            $javaVersionInfo.Arguments = '-version'
+            $javaVersionInfo.UseShellExecute = $false
+            $javaVersionInfo.CreateNoWindow = $true
+            $javaVersionInfo.RedirectStandardOutput = $true
+            $javaVersionInfo.RedirectStandardError = $true
+            $javaVersionProcess = [System.Diagnostics.Process]::new()
+            $javaVersionProcess.StartInfo = $javaVersionInfo
+            $null = $javaVersionProcess.Start()
+            $stdoutTask = $javaVersionProcess.StandardOutput.ReadToEndAsync()
+            $stderrTask = $javaVersionProcess.StandardError.ReadToEndAsync()
+            if ($javaVersionProcess.WaitForExit(5000)) {
+                [System.Threading.Tasks.Task]::WaitAll([System.Threading.Tasks.Task[]]@($stdoutTask, $stderrTask), 1000) | Out-Null
+                $javaVersionText = $stdoutTask.Result + [Environment]::NewLine + $stderrTask.Result
+            } else {
+                $javaVersionProcess.Kill()
+            }
+        } catch { $javaVersionText = '' }
+        finally { if ($null -ne $javaVersionProcess) { $javaVersionProcess.Dispose() } }
+        $javaVersionLine = ($javaVersionText -split '[\r\n]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1)
+        $javaVersionMatch = [regex]::Match([string]$javaVersionLine, '"?(?<major>[0-9]+)(?:\.(?<minor>[0-9]+))?')
+        if ($javaVersionMatch.Success) {
+            $javaMajor = [int]$javaVersionMatch.Groups['major'].Value
+            if ($javaMajor -eq 1 -and $javaVersionMatch.Groups['minor'].Success) {
+                $javaMajor = [int]$javaVersionMatch.Groups['minor'].Value
+            }
+            if ($javaMajor -in @(17, 18)) {
+                $toolchainVersion = $javaMajor
+                Add-Result 'Java prerequisite' 'PASS' "Found Java $javaMajor at $($java.Source); compiler output remains targeted to Java 17 bytecode."
+            } else {
+                Add-Result 'Java prerequisite' 'FAIL' "Found Java major $javaMajor at $($java.Source); this project requires a Java 17-compatible toolchain."
+            }
+        } else {
+            Add-Result 'Java prerequisite' 'FAIL' 'Could not determine the Java runtime version safely.'
+        }
+    } else { Add-Result 'Java prerequisite' 'FAIL' 'java was not found on PATH.' }
 
     $psFiles = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'scripts') -Filter '*.ps1' -File -Recurse)
     $parseFailures = [System.Collections.Generic.List[string]]::new()
@@ -173,7 +213,7 @@ try {
     $existingJar = Join-Path $repoRoot 'build\libs\burp-mcp-all.jar'
     if (Test-Path -LiteralPath $existingJar -PathType Leaf) {
         $beforeHash = Get-Sha256 $existingJar
-        $backupDir = Join-Path (Split-Path -Parent $repoRoot) 'MCP-build-backups'
+        $backupDir = Join-Path $repoRoot 'build\backups'
         $null = New-Item -ItemType Directory -Force -Path $backupDir
         $backupPath = Join-Path $backupDir "burp-mcp-pre-validation-$beforeHash.jar"
         if (-not (Test-Path -LiteralPath $backupPath)) { Copy-Item -LiteralPath $existingJar -Destination $backupPath }
@@ -184,12 +224,14 @@ try {
         Add-Result 'Pre-build JAR backup' 'UNVERIFIED' 'No existing packaged JAR was present to back up.'
     }
 
-    $gradleArgs = if ($Mode -eq 'OFFLINE') {
-        'test --offline --no-daemon --console=plain -Pvalidation.mode=offline'
+    if ($null -ne $toolchainVersion) {
+        $validationSetting = if ($Mode -eq 'OFFLINE') { 'offline' } else { 'all' }
+        $gradleArgs = "test --offline --no-daemon --console=plain -Pvalidation.mode=$validationSetting -Pjava.toolchain.version=$toolchainVersion"
+        $gradleSucceeded = Invoke-BoundedCommand 'Gradle automated tests' @("call `"$repoRoot\gradlew.bat`" $gradleArgs") $PerTestTimeoutSeconds
     } else {
-        'test --offline --no-daemon --console=plain -Pvalidation.mode=all'
+        Add-Result 'Gradle automated tests' 'BLOCKED' 'No supported Java 17 or 18 toolchain was available.'
+        $gradleSucceeded = $false
     }
-    $gradleSucceeded = Invoke-BoundedCommand 'Gradle automated tests' @("call `"$repoRoot\gradlew.bat`" $gradleArgs") $PerTestTimeoutSeconds
 
     $powershellExe = (Get-Process -Id $PID).Path
     if (-not $powershellExe) { $powershellExe = 'powershell.exe' }
@@ -204,11 +246,28 @@ try {
         $concurrentSucceeded = $false
     }
 
+    $pythonAuthTests = Join-Path $repoRoot 'scripts\test_cancel_preflight_auth.py'
+    $pythonPreflightTests = Join-Path $repoRoot 'scripts\test_cancel_test_preflight.py'
+    $authSucceeded = Invoke-BoundedCommand 'Authenticated preflight transport offline regressions' @(
+        "python.exe -B `"$pythonAuthTests`""
+    ) 60
+    $preflightSucceeded = Invoke-BoundedCommand 'Cancellation preflight policy offline regressions' @(
+        "python.exe -B `"$pythonPreflightTests`""
+    ) 60
+    $powershellAuthTest = Join-Path $repoRoot 'scripts\test-cancel-preflight-auth.ps1'
+    $powershellAuthSucceeded = Invoke-BoundedCommand 'PowerShell child environment inheritance' @(
+        "`"$powershellExe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$powershellAuthTest`""
+    ) 30
+
     if ($Mode -in @('LOCAL', 'SUPERVISED')) {
         $localHarness = Join-Path $repoRoot 'scripts\test-local-server.ps1'
         $localSucceeded = Invoke-BoundedCommand 'Bounded localhost server tests' @("`"$powershellExe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$localHarness`"") 180
+        $identityHarness = Join-Path $repoRoot 'scripts\test-local-server-identity.ps1'
+        $identitySucceeded = Invoke-BoundedCommand 'Unattended localhost identity enforcement tests' @("`"$powershellExe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$identityHarness`"") 60
+        $localSucceeded = $localSucceeded -and $identitySucceeded
     } else {
         Add-Result 'Bounded localhost server tests' 'BLOCKED' 'OFFLINE mode performs no network requests; rerun with -Mode LOCAL.'
+        Add-Result 'Unattended localhost identity enforcement tests' 'BLOCKED' 'OFFLINE mode performs no network requests; rerun with -Mode LOCAL.'
         $localSucceeded = $false
     }
 
@@ -234,6 +293,13 @@ try {
             $expectedBuild = (Select-String -LiteralPath (Join-Path $repoRoot 'gradle.properties') -Pattern '^build\.id=(.+)$').Matches[0].Groups[1].Value
             if ($manifest -match [regex]::Escape("Implementation-Version: $expectedVersion") -and $manifest -match [regex]::Escape("Build-Id: $expectedBuild")) {
                 Add-Result 'Packaged JAR metadata' 'PASS' "SHA-256 $jarHash; version $expectedVersion; build $expectedBuild."
+                $candidateDir = Join-Path $repoRoot 'build\candidates'
+                $null = New-Item -ItemType Directory -Force -Path $candidateDir
+                $candidatePath = Join-Path $candidateDir "burp-mcp-$expectedVersion-$expectedBuild.jar"
+                Copy-Item -LiteralPath $jarPath -Destination $candidatePath -Force
+                if ((Get-Sha256 $candidatePath) -eq $jarHash) {
+                    Add-Result 'Candidate JAR preservation' 'PASS' "Preserved candidate SHA-256 $jarHash at $candidatePath; runtime deployment status is separate."
+                } else { Add-Result 'Candidate JAR preservation' 'FAIL' 'Candidate copy SHA-256 did not match the packaged JAR.' }
             } else { Add-Result 'Packaged JAR metadata' 'FAIL' 'JAR metadata did not match gradle.properties.' }
         } else { Add-Result 'Packaged JAR metadata' 'FAIL' 'Expected packaged JAR was not produced.' }
     } else {
@@ -246,7 +312,7 @@ try {
     $scriptTimer.Stop()
     $finishedAt = [DateTime]::UtcNow
     $counts = @{}
-    foreach ($statusName in @('PASS', 'FAIL', 'BLOCKED', 'UNVERIFIED')) {
+    foreach ($statusName in @('PASS', 'FAIL', 'BLOCKED', 'INCONCLUSIVE', 'UNVERIFIED')) {
         $counts[$statusName] = @($results | Where-Object status -eq $statusName).Count
     }
     $report = [ordered]@{

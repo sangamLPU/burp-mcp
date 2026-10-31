@@ -614,6 +614,32 @@ class ToolsKtTest {
         }
 
         @Test
+        fun `partial localhost scope setup reports each URL and preserves existing allowlist`() = runBlocking {
+            val scope = mockk<Scope>()
+            val included = linkedSetOf<String>()
+            val refusedUrl = "http://127.0.0.1:8000/test-cancel"
+            every { api.scope() } returns scope
+            every { scope.isInScope(any()) } answers { firstArg<String>() in included }
+            every { scope.includeInScope(any()) } answers {
+                if (firstArg<String>() != refusedUrl) included += firstArg<String>()
+            }
+            coEvery { StateChangeSecurity.confirm(api, config, any(), any()) } returns true
+
+            val before = config.getAutoApproveTargetsList()
+            val result = client.callTool("burp_configure_local_test_scope", emptyMap())
+            val payload = Json.parseToJsonElement(result.expectTextContent()).jsonObject
+            val checks = payload["checks"]!!.jsonArray
+            val refusedCheck = checks.single { it.jsonObject["url"]!!.jsonPrimitive.content == refusedUrl }.jsonObject
+
+            assertEquals("false", payload["configurationComplete"]!!.jsonPrimitive.content)
+            assertEquals("false", refusedCheck["inBurpScope"]!!.jsonPrimitive.content)
+            assertEquals(before, config.getAutoApproveTargetsList())
+            assertTrue(payload["failureSummary"]!!.jsonPrimitive.content.contains("did not confirm"))
+            assertEquals(8, included.size)
+            verify(exactly = 9) { scope.includeInScope(any()) }
+        }
+
+        @Test
         fun `set task execution engine state should work properly`() {
             val taskExecutionEngine = mockk<TaskExecutionEngine>()
             val burpSuite = mockk<burp.api.montoya.burpsuite.BurpSuite>()

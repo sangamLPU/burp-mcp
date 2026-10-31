@@ -49,12 +49,23 @@ if ($partialTimeout.BytesObserved -ne 1) { throw 'OneByteThenTimeout: expected e
 $partialEofHeader = Assert-Outcome -Name 'OneByteThenEof' -Bytes $oneByteHeader -Termination EOF -ExpectedOutcome PartialHttpResponseEOF -ExpectedPass $false
 $partialReset = Assert-Outcome -Name 'OneByteThenReset' -Bytes $oneByteHeader -Termination ConnectionReset -ExpectedOutcome PartialHttpResponseConnectionReset -ExpectedPass $false
 $partialAbort = Assert-Outcome -Name 'OneByteThenAbort' -Bytes $oneByteHeader -Termination ConnectionAborted -ExpectedOutcome PartialHttpResponseConnectionAborted -ExpectedPass $false
+$partialHeadersBytes = New-HttpTestBytes "HTTP/1.1 502 Bad Gateway`r`nContent-Length: 4`r`n"
+$partialHeaders = Assert-Outcome -Name 'PartialHeadersTimeout' -Bytes $partialHeadersBytes -Termination ReadTimeout -ExpectedOutcome PartialHttpResponseTimeout -ExpectedPass $false
+if ($partialHeaders.Framing -ne 'HeadersIncomplete') { throw 'PartialHeadersTimeout: incomplete headers were not distinguished.' }
+$malformedStatus = New-HttpTestBytes "HTTP/1.1 xyz`r`n`r`n"
+$invalidStatus = Assert-Outcome -Name 'MalformedStatusLine' -Bytes $malformedStatus -Termination EOF -ExpectedOutcome InvalidHttpResponse -ExpectedPass $false
+$malformedHeader = New-HttpTestBytes "HTTP/1.1 502 Bad Gateway`r`nMalformed-Header`r`n`r`nbody"
+$invalidHeader = Assert-Outcome -Name 'MalformedHeaderLine' -Bytes $malformedHeader -Termination EOF -ExpectedOutcome InvalidHttpResponse -ExpectedStatusCode 502 -ExpectedPass $false
 
 $partialBody = New-HttpTestBytes "HTTP/1.1 502 Bad Gateway`r`nContent-Length: 10`r`n`r`nbad"
 $partialEof = Assert-Outcome -Name 'PartialBodyEof' -Bytes $partialBody -Termination EOF -ExpectedOutcome PartialHttpResponseEOF -ExpectedStatusCode 502 -ExpectedPass $false
 if ($partialEof.ExpectedBodyBytes -ne 10 -or $partialEof.BodyBytesObserved -ne 3) {
     throw 'PartialBodyEof: partial Content-Length framing was not reported accurately.'
 }
+$extraBody = New-HttpTestBytes "HTTP/1.1 502 Bad Gateway`r`nContent-Length: 3`r`n`r`nnope"
+$extraBodyObservation = Assert-Outcome -Name 'ExtraBytesAfterContentLength' -Bytes $extraBody -Termination EOF -ExpectedOutcome UnexpectedExtraResponseBytes -ExpectedStatusCode 502 -ExpectedPass $false
+$conflictingContentLength = New-HttpTestBytes "HTTP/1.1 502 Bad Gateway`r`nContent-Length: 3`r`nContent-Length: 4`r`n`r`nnope"
+$invalidContentLength = Assert-Outcome -Name 'ConflictingContentLengths' -Bytes $conflictingContentLength -Termination EOF -ExpectedOutcome InvalidHttpResponse -ExpectedStatusCode 502 -ExpectedPass $false
 
 $emptyTimeout = Assert-Outcome -Name 'EmptyTimeout' -Bytes $empty -Termination ReadTimeout -ExpectedOutcome ReadTimeout -ExpectedPass $false
 $invalidData = New-HttpTestBytes 'X'
@@ -67,6 +78,8 @@ if ($closeResponse.Framing -ne 'CloseDelimited') { throw 'CloseDelimitedError: e
 $chunked = New-HttpTestBytes "HTTP/1.1 502 Bad Gateway`r`nTransfer-Encoding: chunked`r`n`r`n4`r`nnope`r`n0`r`n`r`n"
 $chunkedResponse = Assert-Outcome -Name 'CompleteChunkedError' -Bytes $chunked -Termination Open -ExpectedOutcome HttpResponseComplete -ExpectedStatusCode 502 -ExpectedPass $true
 if ($chunkedResponse.Framing -ne 'Chunked') { throw 'CompleteChunkedError: expected chunked response framing.' }
+$partialChunked = New-HttpTestBytes "HTTP/1.1 502 Bad Gateway`r`nTransfer-Encoding: chunked`r`n`r`n5`r`nno"
+$partialChunkedObservation = Assert-Outcome -Name 'PartialChunkedBody' -Bytes $partialChunked -Termination EOF -ExpectedOutcome PartialHttpResponseEOF -ExpectedStatusCode 502 -ExpectedPass $false
 
 $ambiguousFraming = New-HttpTestBytes "HTTP/1.1 502 Bad Gateway`r`nContent-Length: 4`r`nTransfer-Encoding: chunked`r`n`r`n4`r`nnope`r`n0`r`n`r`n"
 $invalidResponse = Assert-Outcome -Name 'ConflictingFraming' -Bytes $ambiguousFraming -Termination EOF -ExpectedOutcome InvalidHttpResponse -ExpectedPass $false
@@ -74,6 +87,32 @@ $invalidResponse = Assert-Outcome -Name 'ConflictingFraming' -Bytes $ambiguousFr
 $originReached = Test-CancelInterceptionObservation -ClientOutcome $httpError.Outcome -ClientStatusCode $httpError.HttpStatusCode -ServerRequestCount 1
 if ($originReached.Passed -or $originReached.FailedConditions -notcontains 'OriginDidNotReceiveRequest') {
     throw 'OriginRequestDetected: a server observation must fail no-origin-receive validation.'
+}
+
+$testId = 'phase4a-' + ('a' * 32)
+$validDeliveryRecord = [pscustomobject]@{
+    path = '/test-cancel'
+    cancellationTestId = $testId
+    cancellationTestIdVerified = $true
+    cancellationRequestVerified = $true
+}
+$noDeliveryEvidence = Test-CancelServerDeliveryEvidence -Records @() -TestId $testId
+$wrongIdRecord = $validDeliveryRecord.PSObject.Copy()
+$wrongIdRecord.cancellationTestId = 'phase4a-' + ('b' * 32)
+$wrongIdEvidence = Test-CancelServerDeliveryEvidence -Records @($wrongIdRecord) -TestId $testId
+$duplicateEvidence = Test-CancelServerDeliveryEvidence -Records @($validDeliveryRecord, $validDeliveryRecord.PSObject.Copy()) -TestId $testId
+if (-not $noDeliveryEvidence.NoOriginDelivery -or $noDeliveryEvidence.MatchingTestIdRecords -ne 0) {
+    throw 'NoDeliveryEvidence: an empty server record set was not verified as zero origin delivery.'
+}
+if ($wrongIdEvidence.NoOriginDelivery -or $wrongIdEvidence.MatchingTestIdRecords -ne 0 -or $wrongIdEvidence.VerifiedSingleDelivery) {
+    throw 'WrongTestIdEvidence: a wrong test ID was not distinguished from the expected ID.'
+}
+if ($duplicateEvidence.ServerRequestsToTestPath -ne 2 -or $duplicateEvidence.MatchingTestIdRecords -ne 2 -or $duplicateEvidence.VerifiedSingleDelivery) {
+    throw 'DuplicateDeliveryEvidence: duplicate matching delivery was not rejected.'
+}
+if ((Test-CancelInterceptionObservation -ClientOutcome 'EOFWithoutResponse' -ServerRequestCount $wrongIdEvidence.ServerRequestsToTestPath).Passed -or
+    (Test-CancelInterceptionObservation -ClientOutcome 'EOFWithoutResponse' -ServerRequestCount $duplicateEvidence.ServerRequestsToTestPath).Passed) {
+    throw 'Origin delivery with a wrong or duplicated test ID must fail cancellation validation.'
 }
 
 $timeoutSocket = [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]::TimedOut)
@@ -104,13 +143,17 @@ if ((Get-CancelSocketTermination -Exception ([System.IO.IOException]::new('synth
     UnexpectedSuccessResponseRejected = 'PASS'
     OneBytePartialTimeout = 'PASS'
     OneBytePartialEofResetAbort = 'PASS'
+    PartialAndMalformedHeaders = 'PASS'
     PartialBodyEof = 'PASS'
+    ContentLengthMismatchAndExtraBytes = 'PASS'
     EmptyTimeout = 'PASS'
     NonHttpData = 'PASS'
     CloseDelimitedError = 'PASS'
     CompleteChunkedError = 'PASS'
+    PartialChunkedBody = 'PASS'
     ConflictingFramingRejected = 'PASS'
     ServerRequestDetected = 'PASS'
+    WrongTestIdAndDuplicateDeliveryRejected = 'PASS'
     SocketExceptionMapping = 'PASS'
     NetworkRequestsSent = 0
 } | Format-List

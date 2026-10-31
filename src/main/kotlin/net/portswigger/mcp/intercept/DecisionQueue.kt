@@ -11,7 +11,7 @@ class DecisionQueue<T : Any>(private val capacity: Int = 8) {
     data class Ticket<T>(val id: String, val kind: String, val original: T, val deadline: Long,
         var proposed: T? = null, var revision: Int = 0, var approvedRevision: Int? = null, var disclosedRevision: Int? = null,
         var disclosureRequestedRevision: Int? = null, var disclosureStatus: String = "NOT_REQUESTED",
-        val result: CompletableFuture<T?> = CompletableFuture())
+        var approvedBy: String? = null, val result: CompletableFuture<T?> = CompletableFuture())
     data class DisclosureRequest(val status: String, val shouldPrompt: Boolean)
     private val pending = linkedMapOf<String, Ticket<T>>()
     private val completed = linkedMapOf<String, String>()
@@ -57,18 +57,33 @@ class DecisionQueue<T : Any>(private val capacity: Int = 8) {
         ticket.proposed = value
         ticket.revision++
         ticket.approvedRevision = null
+        ticket.approvedBy = null
         ticket.disclosedRevision = null
         ticket.disclosureRequestedRevision = null
         ticket.disclosureStatus = "NOT_REQUESTED"
         ActivityLog.record("intercept_propose", "proposed", "$id revision=${ticket.revision}")
         return ticket.revision
     }
-    @Synchronized fun approve(id: String, revision: Int) {
+    @Synchronized fun approve(id: String, revision: Int, approvedBy: String = "HUMAN") {
         get(id)
         val ticket = pending.getValue(id)
         check(ticket.revision == revision) { "Revision changed during human review" }
         ticket.approvedRevision = revision
-        ActivityLog.record("intercept_approve", "approved", "$id revision=$revision")
+        ticket.approvedBy = approvedBy
+        ActivityLog.record("intercept_approve", if (approvedBy == "HUMAN") "approved" else "auto_approved", "$id revision=$revision source=$approvedBy")
+    }
+
+    @Synchronized fun revokeApprovals(approvedBy: String): Int {
+        var revoked = 0
+        pending.values.forEach { ticket ->
+            if (ticket.approvedBy == approvedBy) {
+                ticket.approvedRevision = null
+                ticket.approvedBy = null
+                revoked++
+                ActivityLog.record("intercept_approve", "revoked", "${ticket.kind} ${ticket.id} revision=${ticket.revision}; source=$approvedBy")
+            }
+        }
+        return revoked
     }
     @Synchronized fun disclose(id: String, revision: Int) {
         get(id)
