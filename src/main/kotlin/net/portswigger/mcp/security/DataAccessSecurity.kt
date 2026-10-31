@@ -76,6 +76,8 @@ object DataAccessSecurity {
             return true
         }
 
-        return approvalHandler.requestDataAccess(accessType, config)
+        return ApprovalTimeout.await("data access: ${accessType.name}") {
+            approvalHandler.requestDataAccess(accessType, config)
+        } == true
     }
 }

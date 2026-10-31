@@ -17,6 +17,7 @@ import net.portswigger.mcp.config.Dialogs
 import net.portswigger.mcp.security.RequestRateLimiter
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Tag
 import java.net.InetSocketAddress
 import java.net.URI
 import java.net.http.HttpClient
@@ -28,6 +29,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.runBlocking
 
 /** Exercises the installed Proxy handler callbacks with real loopback client/server HTTP traffic. */
+@Tag("loopback")
 class LiveInterceptionLocalHttpTest {
     @Test
     fun `approved header edits cross request and response callback boundaries on loopback`() = runBlocking {

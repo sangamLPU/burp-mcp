@@ -32,6 +32,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.jsonArray
 import net.portswigger.mcp.KtorServerManager
 import net.portswigger.mcp.ServerState
 import net.portswigger.mcp.TestStreamableHttpMcpClient
@@ -45,9 +46,11 @@ import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Tag
 import java.net.ServerSocket
 import javax.swing.JTextArea
 
+@Tag("loopback")
 class ToolsKtTest {
     
     private var client = TestStreamableHttpMcpClient()
@@ -61,6 +64,11 @@ class ToolsKtTest {
     private val capturedRequest = slot<HttpRequest>()
 
     init {
+        val persistedStrings = mutableMapOf(
+            "host" to "127.0.0.1",
+            "bearerToken" to "test-token",
+            "_autoApproveTargets" to "example.com"
+        )
         val persistedObject = mockk<PersistedObject>().apply {
             every { getBoolean("enabled") } returns true
             every { getBoolean("readOnlyMode") } returns false
@@ -71,13 +79,11 @@ class ToolsKtTest {
             every { getBoolean("_alwaysAllowHttpHistory") } returns false
             every { getBoolean("_alwaysAllowWebSocketHistory") } returns false
             every { getBoolean("_alwaysAllowOrganizer") } returns false
-            every { getString("host") } returns "127.0.0.1"
-            every { getString("bearerToken") } returns "test-token"
-            every { getString("_autoApproveTargets") } returns "example.com"
+            every { getString(any()) } answers { persistedStrings[firstArg()] }
             every { getInteger(any()) } returns null
             every { getInteger("port") } returns testPort
             every { setBoolean(any(), any()) } returns Unit
-            every { setString(any(), any()) } returns Unit
+            every { setString(any(), any()) } answers { persistedStrings[firstArg()] = secondArg() }
             every { setInteger(any(), any()) } returns Unit
         }
         val mockLogging = mockk<Logging>().apply {
@@ -558,6 +564,55 @@ class ToolsKtTest {
     
     @Nested
     inner class ConfigurationToolsTests {
+        @Test
+        fun `localhost scope setup adds only fixed endpoints after local approval`() = runBlocking {
+            val scope = mockk<Scope>()
+            val included = linkedSetOf<String>()
+            every { api.scope() } returns scope
+            every { scope.isInScope(any()) } answers { firstArg<String>() in included }
+            every { scope.includeInScope(any()) } answers { included += firstArg<String>() }
+            coEvery { StateChangeSecurity.confirm(api, config, any(), any()) } returns true
+
+            val before = config.getAutoApproveTargetsList()
+            val result = client.callTool("burp_configure_local_test_scope", emptyMap())
+            val payload = Json.parseToJsonElement(result.expectTextContent()).jsonObject
+            val urls = payload["checks"]!!.jsonArray.map { it.jsonObject["url"]!!.jsonPrimitive.content }
+
+            assertEquals(
+                listOf(
+                    "http://127.0.0.1:8000/test-html",
+                    "http://127.0.0.1:8000/test-post",
+                    "http://127.0.0.1:8000/test-form",
+                    "http://127.0.0.1:8000/test-upload",
+                    "http://127.0.0.1:8000/test-cancel",
+                    "http://127.0.0.1:8000/test-timeout",
+                    "http://127.0.0.1:8000/test-session-expiry",
+                    "http://127.0.0.1:8000/test-concurrent-a",
+                    "http://127.0.0.1:8000/test-concurrent-b"
+                ),
+                urls
+            )
+            assertEquals(urls.toSet(), included)
+            assertTrue(config.getAutoApproveTargetsList().contains("127.0.0.1:8000"))
+            assertTrue(config.getAutoApproveTargetsList().containsAll(before))
+            verify(exactly = 9) { scope.includeInScope(any()) }
+            coVerify(exactly = 1) { StateChangeSecurity.confirm(api, config, "Configure localhost test scope", any()) }
+        }
+
+        @Test
+        fun `localhost scope setup changes nothing when local approval is denied`() = runBlocking {
+            val scope = mockk<Scope>(relaxed = true)
+            every { api.scope() } returns scope
+            coEvery { StateChangeSecurity.confirm(api, config, any(), any()) } returns false
+
+            val before = config.getAutoApproveTargetsList()
+            val result = client.callTool("burp_configure_local_test_scope", emptyMap())
+
+            assertTrue(result.expectTextContent().contains("local Burp confirmation was not approved"))
+            assertEquals(before, config.getAutoApproveTargetsList())
+            verify(exactly = 0) { scope.includeInScope(any()) }
+        }
+
         @Test
         fun `set task execution engine state should work properly`() {
             val taskExecutionEngine = mockk<TaskExecutionEngine>()
@@ -1129,6 +1184,8 @@ class ToolsKtTest {
         every { version.edition() } returns BurpSuiteEdition.COMMUNITY_EDITION
         runBlocking {
             val tools = client.listTools()
+            assertEquals(50, tools.size, "The base Community tool server omits live interception registrations and includes the scoped localhost helper")
+            assertTrue(tools.any { it.name == "burp_configure_local_test_scope" })
             assertFalse(tools.any { it.name == "get_scanner_issues" })
             assertFalse(tools.any { it.name == "generate_collaborator_payload" })
             assertFalse(tools.any { it.name == "get_collaborator_interactions" })

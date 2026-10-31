@@ -13,6 +13,7 @@ import net.portswigger.mcp.security.SafeContent
 import net.portswigger.mcp.security.StateChangeSecurity
 import net.portswigger.mcp.security.ActivityEvent
 import net.portswigger.mcp.security.ActivityLog
+import net.portswigger.mcp.security.ApprovalTimeout
 import net.portswigger.mcp.tools.mcpTool
 import net.portswigger.mcp.tools.McpToolError
 
@@ -122,13 +123,15 @@ fun Server.registerInterceptionTools(live: LiveInterception, api: MontoyaApi) {
         } else {
             val health = live.health()
             if (health.enabled) {
-                check(Dialogs.requestOption(
-                    net.portswigger.mcp.security.findBurpFrame(),
-                    "Stop live interception? Any held request or response will be dropped.\n\n" +
-                        "Currently pending: ${health.pendingRequests} requests and ${health.pendingResponses} responses.",
-                    arrayOf("Stop and drop held traffic", "Keep session active"),
-                    title = "Confirm live interception stop"
-                ) == 0) { "User denied stopping live interception" }
+                check(ApprovalTimeout.await("stop live interception") {
+                    Dialogs.requestOption(
+                        net.portswigger.mcp.security.findBurpFrame(),
+                        "Stop live interception? Any held request or response will be dropped.\n\n" +
+                            "Currently pending: ${health.pendingRequests} requests and ${health.pendingResponses} responses.",
+                        arrayOf("Stop and drop held traffic", "Keep session active"),
+                        title = "Confirm live interception stop"
+                    ) == 0
+                } == true) { "User denied or timed out stopping live interception" }
             }
             live.disable()
         }
@@ -136,13 +139,15 @@ fun Server.registerInterceptionTools(live: LiveInterception, api: MontoyaApi) {
     }
     mcpTool<BurpCancelInterceptions>("Emergency cancellation: asks for local confirmation, then disables live interception and drops all held traffic.") {
         val health = live.health()
-        check(Dialogs.requestOption(
-            net.portswigger.mcp.security.findBurpFrame(),
-            "An MCP client requested emergency cancellation. This stops capture and drops all held requests and responses.\n\n" +
-                "Currently pending: ${health.pendingRequests} requests and ${health.pendingResponses} responses.",
-            arrayOf("Cancel and drop all", "Keep session active"),
-            title = "Confirm emergency cancellation"
-        ) == 0) { "User denied emergency cancellation" }
+        check(ApprovalTimeout.await("emergency interception cancellation") {
+            Dialogs.requestOption(
+                net.portswigger.mcp.security.findBurpFrame(),
+                "An MCP client requested emergency cancellation. This stops capture and drops all held requests and responses.\n\n" +
+                    "Currently pending: ${health.pendingRequests} requests and ${health.pendingResponses} responses.",
+                arrayOf("Cancel and drop all", "Keep session active"),
+                title = "Confirm emergency cancellation"
+            ) == 0
+        } == true) { "User denied or timed out emergency cancellation" }
         live.cancel()
         "CANCELLED: all held traffic dropped and capture disabled."
     }

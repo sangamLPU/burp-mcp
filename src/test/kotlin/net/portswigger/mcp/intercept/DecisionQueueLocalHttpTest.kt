@@ -10,6 +10,7 @@ import net.portswigger.mcp.config.McpConfig
 import net.portswigger.mcp.tools.isAuthorizedRequest
 import com.sun.net.httpserver.HttpServer
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Assertions.*
 import java.net.InetSocketAddress
 import java.net.URI
@@ -22,6 +23,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /** Real loopback HTTP traffic, with the local target first verified against scope and host allowlist. */
+@Tag("loopback")
 class DecisionQueueLocalHttpTest {
     @Test fun `queue decisions gate a real local HTTP exchange and drop prevents sending`() {
         val hits=AtomicInteger();val server=HttpServer.create(InetSocketAddress("127.0.0.1",0),0)

@@ -58,7 +58,7 @@ opencode
 | `burp_cancel_interceptions` | `{}`; disable and drop all immediately |
 | `burp_set_proxy_intercept_state` | `enabled`; prefixed alias controlling native Proxy interception after human approval; does not enable AI queue |
 
-The original `set_proxy_intercept_state` tool and all other original tool names are preserved. The Professional edition registers 52 original tools plus 18 additions (70), including read-only `burp_get_intercept_diagnostics`; Community omits the three legacy Professional-only tool registrations (67). Scanner-specific prefixed tools remain discoverable in Community and return explicit unsupported errors.
+The original `set_proxy_intercept_state` tool and all other original tool names are preserved. Build `.1` registered 52 original tools plus 18 additions (70) in Professional; Community omitted the three legacy Professional-only registrations (67). Build `.2` adds `burp_configure_local_test_scope`, bringing the source catalog to 71 Professional tools and 68 Community tools. It can include only the nine fixed `127.0.0.1:8000` test paths and add only that host to the explicit allowlist after local Burp confirmation. It does not disable scope checks, read-only mode, or per-request approval. The live `.1` extension remains at 70 tools until a human reloads `.2`. Scanner-specific prefixed tools remain discoverable in Community and return explicit unsupported errors.
 
 ## Verification
 

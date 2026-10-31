@@ -97,7 +97,9 @@ object HttpRequestSecurity {
             return true
         }
 
-        return approvalHandler.requestApproval(hostname, port, config, requestContent, api)
+        return ApprovalTimeout.await("HTTP request: $hostname:$port") {
+            approvalHandler.requestApproval(hostname, port, config, requestContent, api)
+        } == true
     }
 
     /**
@@ -139,7 +141,9 @@ object HttpRequestSecurity {
             return false
         }
 
-        val approved = approvalHandler.requestApproval(host, port, config, "[Burp MCP action: $action]\n${request}", api)
+        val approved = ApprovalTimeout.await("$action: $host:$port") {
+            approvalHandler.requestApproval(host, port, config, "[Burp MCP action: $action]\n${request}", api)
+        } == true
         ActivityLog.record(action, if (approved) "approved" else "denied")
         return approved
     }

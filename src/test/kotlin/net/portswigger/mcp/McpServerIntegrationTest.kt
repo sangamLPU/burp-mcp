@@ -15,6 +15,7 @@ import io.mockk.mockk
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import net.portswigger.mcp.config.McpConfig
@@ -23,8 +24,10 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Tag
 import java.net.ServerSocket
 
+@Tag("loopback")
 class McpServerIntegrationTest {
     private val client = TestStreamableHttpMcpClient()
     private val api = mockk<MontoyaApi>(relaxed = true)
@@ -107,10 +110,49 @@ class McpServerIntegrationTest {
             
             val tools = client.listTools()
             assertFalse(tools.isEmpty(), "Server should have registered tools")
-            assertEquals(70, tools.size, "The Professional MCP catalog must retain all tools, including read-only interception diagnostics")
+            assertEquals(71, tools.size, "The Professional MCP catalog must retain the existing tools and the approved localhost scope helper")
+            assertEquals(tools.size, tools.map { it.name }.toSet().size, "MCP tool names must be unique")
+            val expectedToolNames = setOf(
+                "base64_decode", "base64_encode",
+                "burp_analyze_authentication", "burp_analyze_cookies", "burp_analyze_cors",
+                "burp_analyze_request", "burp_analyze_response", "burp_analyze_security_headers",
+                "burp_approve_intercepted_request_edit", "burp_approve_intercepted_response_edit",
+                "burp_cancel_interceptions", "burp_check_connection", "burp_compare_responses",
+                "burp_configure_local_test_scope", "burp_drop_intercepted_request", "burp_drop_intercepted_response",
+                "burp_find_sensitive_data", "burp_forward_intercepted_request", "burp_forward_intercepted_response",
+                "burp_generate_security_report", "burp_get_capabilities", "burp_get_intercept_diagnostics",
+                "burp_get_intercept_status", "burp_get_intercepted_request", "burp_get_intercepted_response",
+                "burp_get_project_info", "burp_get_proxy_history", "burp_get_repeater_tabs", "burp_get_request",
+                "burp_get_response", "burp_get_response_headers", "burp_get_scan_status", "burp_get_scanner_issues",
+                "burp_get_scope", "burp_get_site_map", "burp_get_status", "burp_list_pending_requests",
+                "burp_list_pending_responses", "burp_modify_request", "burp_propose_intercepted_request_edit",
+                "burp_propose_intercepted_response_edit", "burp_request_intercept_disclosure",
+                "burp_search_http_history", "burp_send_http_request", "burp_send_to_repeater",
+                "burp_set_live_interception_state", "burp_set_proxy_intercept_state", "burp_start_scan",
+                "burp_stop_scan", "create_repeater_tab", "create_repeater_tab_http2",
+                "generate_collaborator_payload", "generate_random_string", "get_active_editor_contents",
+                "get_collaborator_interactions", "get_organizer_items", "get_organizer_items_regex",
+                "get_proxy_http_history", "get_proxy_http_history_regex", "get_scanner_issues",
+                "output_project_options", "output_user_options", "send_http1_request", "send_http2_request",
+                "set_active_editor_contents", "set_project_options", "set_proxy_intercept_state",
+                "set_task_execution_engine_state", "set_user_options", "url_decode", "url_encode"
+            )
+            assertEquals(expectedToolNames, tools.map { it.name }.toSet(), "The Professional tool contract must not lose or rename an existing tool")
+            assertTrue(tools.any { it.name == "burp_configure_local_test_scope" })
             assertTrue(tools.any { it.name == "burp_get_intercepted_request" })
             assertTrue(tools.any { it.name == "burp_forward_intercepted_response" })
             assertTrue(tools.any { it.name == "burp_get_intercept_diagnostics" })
+            tools.forEach { tool ->
+                assertEquals("object", tool.inputSchema.type, "${tool.name} must expose an object input schema")
+                assertFalse(tool.description.isNullOrBlank(), "${tool.name} must document its behavior")
+                val properties = tool.inputSchema.properties
+                val required = tool.inputSchema.required.orEmpty()
+                assertTrue(required.all { properties?.containsKey(it) == true }, "${tool.name} required fields must exist in properties")
+                properties?.forEach { (propertyName, schema) ->
+                    assertTrue(schema is JsonObject, "${tool.name}.$propertyName must have a JSON object schema")
+                    assertTrue((schema as JsonObject).containsKey("type"), "${tool.name}.$propertyName must declare a schema type")
+                }
+            }
             
             val toolNames = tools.map { it.name }
             assertTrue(toolNames.contains("output_project_options"), "Server should have output_project_options tool")

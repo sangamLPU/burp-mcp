@@ -60,7 +60,11 @@ application {
 
 tasks {
     test {
-        useJUnitPlatform()
+        useJUnitPlatform {
+            if (providers.gradleProperty("validation.mode").orElse("all").get().equals("offline", ignoreCase = true)) {
+                excludeTags("loopback")
+            }
+        }
         systemProperty("file.encoding", "UTF-8")
 
         testLogging {
