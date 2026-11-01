@@ -1,6 +1,8 @@
 param(
     [string]$TestRunId = '',
-    [string]$ServerIdentity = ''
+    [string]$ServerIdentity = '',
+    [switch]$IdentityFromEnvironment,
+    [switch]$PassThru
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,6 +20,11 @@ $maxRunSeconds = 900
 $healthUrl = 'http://127.0.0.1:8000/__phase4a-health'
 $healthMarker = 'MCP_LOCAL_TEST_SERVER_READY'
 $serverProcess = $null
+
+if ($IdentityFromEnvironment) {
+    $TestRunId = [Environment]::GetEnvironmentVariable('BURP_TEST_RUN_ID', 'Process')
+    $ServerIdentity = [Environment]::GetEnvironmentVariable('BURP_TEST_SERVER_IDENTITY', 'Process')
+}
 
 if ([string]::IsNullOrWhiteSpace($TestRunId) -xor [string]::IsNullOrWhiteSpace($ServerIdentity)) {
     throw 'Supply both -TestRunId and -ServerIdentity for unattended local test mode, or supply neither.'
@@ -121,7 +128,7 @@ try {
         throw 'Local test server stopped during its health check.'
     }
 
-    [pscustomobject]@{
+    $readyResult = [pscustomobject]@{
         State = 'READY'
         ProcessId = $serverProcess.Id
         LoopbackEndpoint = '127.0.0.1:8000'
@@ -131,7 +138,8 @@ try {
         MaxRunSeconds = $maxRunSeconds
         HealthCheck = 'PASS; excluded from the origin observation log'
         ObservationLog = $logPath
-    } | Format-List
+    }
+    if ($PassThru) { $readyResult } else { $readyResult | Format-List }
 } catch {
     if ($null -ne $serverProcess) {
         $serverProcess.Refresh()

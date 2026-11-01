@@ -3,6 +3,8 @@ param(
     [switch]$AuthOnly,
     [switch]$WaitForLiveSession,
     [switch]$OfflineSimulationNoTraffic,
+    [ValidateRange(150, 600)] [int]$MinimumSessionSeconds = 300,
+    [string]$CoordinatorStatePath = '',
     [string]$TestRunId = [Environment]::GetEnvironmentVariable('BURP_TEST_RUN_ID', 'Process'),
     [string]$ServerIdentity = [Environment]::GetEnvironmentVariable('BURP_TEST_SERVER_IDENTITY', 'Process')
 )
@@ -19,6 +21,25 @@ $python = Get-Command 'python.exe' -ErrorAction Stop
 $previousToken = [Environment]::GetEnvironmentVariable('BURP_MCP_TOKEN', 'Process')
 $previousTestRunId = [Environment]::GetEnvironmentVariable('BURP_TEST_RUN_ID', 'Process')
 $previousServerIdentity = [Environment]::GetEnvironmentVariable('BURP_TEST_SERVER_IDENTITY', 'Process')
+
+function Write-CancelCoordinatorState {
+    param([Parameter(Mandatory = $true)] [hashtable]$State)
+    if ([string]::IsNullOrWhiteSpace($CoordinatorStatePath)) { return }
+    $path = [System.IO.Path]::GetFullPath($CoordinatorStatePath)
+    $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([char] '\') + '\'
+    if (-not $path.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Coordinator state file must be inside the current user temporary directory.'
+    }
+    $json = $State | ConvertTo-Json -Depth 5 -Compress
+    [System.IO.File]::WriteAllText($path, $json, [System.Text.UTF8Encoding]::new($false))
+}
+
+if (-not [string]::IsNullOrWhiteSpace($CoordinatorStatePath)) {
+    $stateDirectory = Split-Path -Parent ([System.IO.Path]::GetFullPath($CoordinatorStatePath))
+    if (-not (Test-Path -LiteralPath $stateDirectory -PathType Container)) {
+        throw 'Coordinator state directory does not exist; no request was sent.'
+    }
+}
 try {
     if ($AuthOnly) {
         $null = Invoke-CancelTestAuthentication -PythonPath $python.Source -PreflightScript $preflightScript -PromptForMcpToken:$PromptForMcpToken
@@ -43,7 +64,11 @@ try {
         Write-Host 'Setup is complete. Activate the fresh interception session in Burp, then resume this runner for one fast final preflight.'
         Read-Host -Prompt 'After the approved 300-second session is active, press Enter once to run the final preflight and one request; Ctrl+C cancels'
     }
-    Invoke-CancelTestPreflightProcess -PythonPath $python.Source -PreflightScript $preflightScript -PreflightArguments @() -PromptForMcpToken:$PromptForMcpToken
+    $finalPreflightArguments = @()
+    if ($MinimumSessionSeconds -ne 300) {
+        $finalPreflightArguments = @('--minimum-session-seconds', "$MinimumSessionSeconds")
+    }
+    Invoke-CancelTestPreflightProcess -PythonPath $python.Source -PreflightScript $preflightScript -PreflightArguments $finalPreflightArguments -PromptForMcpToken:$PromptForMcpToken
 } finally {
     [Environment]::SetEnvironmentVariable('BURP_MCP_TOKEN', $previousToken, 'Process')
     [Environment]::SetEnvironmentVariable('BURP_TEST_RUN_ID', $previousTestRunId, 'Process')
@@ -65,6 +90,13 @@ $targetPort = 8000
 $targetPath = '/test-cancel'
 $targetUrl = "http://$targetHost`:$targetPort$targetPath"
 $testId = 'phase4a-' + [Guid]::NewGuid().ToString('N')
+$null = Write-CancelCoordinatorState -State @{
+    phase = 'Prepared'
+    testId = $testId
+    targetPath = $targetPath
+    requestSent = $false
+    timestampUtc = [DateTime]::UtcNow.ToString('o')
+}
 $crlf = [string]([char]13) + [char]10
 $logPath = Join-Path $PSScriptRoot '..\build\live-test-server-observations.jsonl'
 
@@ -104,6 +136,13 @@ try {
     $stream = $client.GetStream()
     $stream.Write($requestBytes, 0, $requestBytes.Length)
     $stream.Flush()
+    $null = Write-CancelCoordinatorState -State @{
+        phase = 'RequestSent'
+        testId = $testId
+        targetPath = $targetPath
+        requestSent = $true
+        timestampUtc = [DateTime]::UtcNow.ToString('o')
+    }
 
     [pscustomobject]@{
         State = 'Request sent once; leave this PowerShell process running while the held request is dropped in Burp.'
@@ -157,6 +196,20 @@ try {
     $serverEvidence = Test-CancelServerDeliveryEvidence -Records $newRecords -TestId $testId
     $serverVerified = $serverEvidence.VerifiedSingleDelivery
     $validation = Test-CancelInterceptionObservation -ClientOutcome $clientOutcome -ClientStatusCode $clientObservation.HttpStatusCode -ServerRequestCount $serverEvidence.ServerRequestsToTestPath
+
+    $null = Write-CancelCoordinatorState -State @{
+        phase = 'Complete'
+        testId = $testId
+        targetPath = $targetPath
+        requestSent = $true
+        clientOutcome = $clientOutcome
+        clientHttpStatusCode = $clientObservation.HttpStatusCode
+        serverRequestsToTestPath = $serverEvidence.ServerRequestsToTestPath
+        matchingTestIdRecords = $serverEvidence.MatchingTestIdRecords
+        validationPassed = [bool]$validation.Passed
+        failedConditions = @($validation.FailedConditions)
+        timestampUtc = [DateTime]::UtcNow.ToString('o')
+    }
 
     [pscustomobject]@{
         ClientOriginEvidence = if ($validation.Passed) { 'PASS' } else { 'FAIL' }

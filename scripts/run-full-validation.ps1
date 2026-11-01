@@ -127,7 +127,9 @@ try {
     $requiredPaths = @(
         'settings.gradle.kts', 'build.gradle.kts', 'gradle.properties', 'gradlew.bat',
         'src/main/kotlin', 'src/test/kotlin', 'scripts/local-test-server.ps1',
-        'scripts/test-local-server.ps1', 'scripts/test-local-server-identity.ps1', 'scripts/test-cancel-validation.ps1'
+        'scripts/test-local-server.ps1', 'scripts/test-local-server-identity.ps1', 'scripts/test-cancel-validation.ps1',
+        'scripts/run-supervised-reliability-suite.ps1', 'scripts/test-supervised-reliability-suite-offline.ps1',
+        'scripts/test-cancel-fixture-coordinator.ps1'
     )
     $missingPaths = @($requiredPaths | Where-Object { -not (Test-Path -LiteralPath (Join-Path $repoRoot $_)) })
     if ($missingPaths.Count -eq 0) {
@@ -287,16 +289,25 @@ try {
     $orchestratorSucceeded = Invoke-BoundedCommand 'Validation orchestrator artifact-preservation regressions' @(
         "`"$powershellExe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$orchestratorTest`""
     ) 30
+    $supervisedCoordinatorTest = Join-Path $repoRoot 'scripts\test-supervised-reliability-suite-offline.ps1'
+    $supervisedCoordinatorSucceeded = Invoke-BoundedCommand 'Supervised coordinator end-to-end offline regressions' @(
+        "`"$powershellExe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$supervisedCoordinatorTest`""
+    ) 120
 
     if ($Mode -in @('LOCAL', 'SUPERVISED')) {
         $localHarness = Join-Path $repoRoot 'scripts\test-local-server.ps1'
         $localSucceeded = Invoke-BoundedCommand 'Bounded localhost server tests' @("`"$powershellExe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$localHarness`"") 180
         $identityHarness = Join-Path $repoRoot 'scripts\test-local-server-identity.ps1'
         $identitySucceeded = Invoke-BoundedCommand 'Unattended localhost identity enforcement tests' @("`"$powershellExe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$identityHarness`"") 60
-        $localSucceeded = $localSucceeded -and $identitySucceeded
+        $fixtureCoordinatorHarness = Join-Path $repoRoot 'scripts\test-cancel-fixture-coordinator.ps1'
+        $fixtureCoordinatorSucceeded = Invoke-BoundedCommand 'Identity-bound cancellation fixture coordinator tests' @(
+            "`"$powershellExe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$fixtureCoordinatorHarness`""
+        ) 60
+        $localSucceeded = $localSucceeded -and $identitySucceeded -and $fixtureCoordinatorSucceeded
     } else {
         Add-Result 'Bounded localhost server tests' 'BLOCKED' 'OFFLINE mode performs no network requests; rerun with -Mode LOCAL.'
         Add-Result 'Unattended localhost identity enforcement tests' 'BLOCKED' 'OFFLINE mode performs no network requests; rerun with -Mode LOCAL.'
+        Add-Result 'Identity-bound cancellation fixture coordinator tests' 'BLOCKED' 'OFFLINE mode performs no network requests; rerun with -Mode LOCAL.'
         $localSucceeded = $false
     }
 

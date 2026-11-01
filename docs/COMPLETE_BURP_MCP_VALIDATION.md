@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-01
 **Repository:** D:\Projects\MCP
-**Branch/base:** main / 41e6bf1 before local changes
+**Branch/base:** main / 57cf38165bb2e3e1f26f3867b2d4a9c2f21beeb8 before this validation cycle
 **Running build:** 20261101.5-burp2024.1.1.1
 **Burp:** Professional 2024.1.1.1-26891
 **Extension version:** 1.3.2
@@ -15,12 +15,14 @@ The loaded extension is responsive and authenticated MCP calls succeeded. The ru
 
 The nine fixed http://127.0.0.1:8000 paths all report inBurpScope=true, hostAllowlisted=true, and eligible=true. The current live state is safe for continued offline work: interception is disabled, the session and heartbeat are expired, unattended mode is inactive, and both pending queues are empty.
 
-The latest full LOCAL run finished in 26.54 seconds with **19 PASS, 0 FAIL, 0 BLOCKED, 0 INCONCLUSIVE, 2 UNVERIFIED, 0 UNSUPPORTED**. Its Gradle portion passed **182 JUnit tests, 0 failures/errors/skips**. Python, PowerShell, and local fixture regressions also passed. No live cancellation request was sent. **Phase 4A remains INCONCLUSIVE** pending a supervised request and actual Burp drop evidence.
+The latest LOCAL run completed **21 PASS, 0 FAIL, 0 BLOCKED, 0 INCONCLUSIVE, 2 UNVERIFIED, 0 UNSUPPORTED**. The wrapper correctly classifies its aggregate as **INCONCLUSIVE** because approval-gated live behavior and candidate JAR creation remain unverified. Its Gradle task was up-to-date in that coordinator run; a subsequent forced execution ran **182 JUnit tests, 0 failures/errors/skips**. No live cancellation request was sent. **Phase 4A remains INCONCLUSIVE** pending active human-enabled authorization and actual Burp drop evidence.
 
 The packaged JAR was not rebuilt or replaced. Its SHA-256 remained 75186ec81d6f9d16c19802368677d4b33d1294d62e020cf338ccc3da5103b1d4. The coordinator now excludes shadowJar by default; candidate packaging requires an explicit -BuildCandidate.
 
 Machine-readable results:
-- [Latest LOCAL coordinator report](../build/reports/full-validation/validation-2caae7264ab443aaba138fbf4f147a73.json)
+- [Latest LOCAL coordinator report](../build/reports/full-validation/validation-6bc7c1a72e834360ad8387565a1d085c.json)
+- [Latest OFFLINE coordinator report](../build/reports/full-validation/validation-29830fabd6a748e490fc9d2aa79f29c1.json)
+- [SUPERVISED preflight report](../build/reports/supervised-reliability-20261101T070522Z-3daa0046.json)
 - [OFFLINE coordinator report](../build/reports/full-validation/validation-6abf0e7fb826423ea699ea968b6f6aa1.json)
 - [71-tool catalog and input signatures](../build/reports/tool-catalog-audit.json)
 - [Mission summary JSON](../build/reports/burp-mcp-validation-summary.json)
@@ -49,26 +51,28 @@ The seven live-verification tool calls were burp_check_connection, burp_get_stat
 
 ### Full LOCAL validation
 
-Coordinator run ID: 2caae7264ab443aaba138fbf4f147a73.
+Coordinator run ID: 6bc7c1a72e834360ad8387565a1d085c.
 
-- 19 coordinator checks passed; no coordinator failures or blocked items.
+- 21 coordinator checks passed; no coordinator failures or blocked items. The wrapper aggregate is INCONCLUSIVE because two checks remain unverified.
 - Two items remain UNVERIFIED by design: approval-gated live Burp behavior and creation of a new candidate JAR.
-- 182 JUnit cases passed, with no failures, errors, or skipped tests.
+- A forced Gradle execution after that coordinator run passed 182 JUnit tests, with no failures, errors, or skipped tests. The direct command excluded shadowJar and did not rebuild the JAR.
 - The JUnit set includes eight local MCP integration tests: bearer rejection, tool listing, input validation, safe disclosure behavior, pending approval serialization, graceful shutdown, and concurrent status responsiveness.
 - The server fixture reported 23 local cases passed; the separate identity-enforcement script exited successfully.
 - JAR packaging was excluded. Existing manifest identity and SHA-256 were checked read-only.
 
 ### Offline cancellation and authentication regressions
 
-- Cancellation preflight policy: **20 Python tests passed**, including both independent final deadlines at 300, 240, 180, 150, and 120 seconds.
+- Cancellation preflight policy/coordinator API: **31 Python tests passed**, including the 150-second cancellation budget, independently expiring session and authorization deadlines, active identity retrieval, nine-target scope, one-shot drop evidence, and stale-ID operations.
 - Setup authorization budget: setup requires **180 seconds** remaining: the 150-second request budget plus 30 seconds for the required Burp-local session activation. Values at 300, 240, and 180 pass; 150 and 120 fail before session activation.
 - Authentication transport: **14 Python tests passed**.
-- PowerShell auth/process handling: **36 assertions passed**, including secure prompt fallback after HTTP 401, missing/rejected tokens, stderr/nonzero child exit, and zero/one/multiple Python arguments.
+- PowerShell auth/process handling: **38 assertions passed**, including secure prompt fallback after HTTP 401, missing/rejected tokens, stderr/nonzero child exit, zero/one/multiple Python arguments, and captured identity handoff without console output.
 - Copied workflow simulation: **26 assertions passed**. A controlled child process exercised fixture readiness, setup preflight before pause, pause/resume, final preflight, setup/final failures, and the no-request gate. It contacted no Burp or origin server.
+- Supervised coordinator simulation: **22 assertions passed** in actual PowerShell child processes. It exercised identity capture, fixture lifecycle, setup-before-session ordering, a single runner and drop, cleanup, setup-failure gating, inactive-authorization blocking, and aggregate status propagation; no Burp or HTTP request was sent.
+- Identity-bound fixture handoff: **10 local assertions passed** using the real prepare script and server. It verified process-environment identities, a matching direct health response, no identity/token values in process arguments or result output, and cleanup of only the fixture's listener.
 - Cancellation response validator: **19 framing/outcome cases passed**; NetworkRequestsSent=0.
 - Concurrent runner validator: positive edited framing, malformed framing rejection, and cross-association rejection passed; NetworkRequestsSent=0.
 - PowerShell syntax checks and git diff --check passed.
-- Full OFFLINE coordinator: **17 PASS, 0 FAIL, 2 BLOCKED, 2 UNVERIFIED**. The two BLOCKED checks are the local-only suites deliberately excluded by OFFLINE mode.
+- Full OFFLINE coordinator: **18 PASS, 0 FAIL, 3 BLOCKED, 2 UNVERIFIED**; the aggregate is BLOCKED. The three blocked items are the local-only suites deliberately excluded by OFFLINE mode.
 
 ## Reliability fixes verified offline
 
@@ -78,6 +82,8 @@ Coordinator run ID: 2caae7264ab443aaba138fbf4f147a73.
 4. The copied workflow now runs authenticated setup, identity, scope, queue, and fixture checks before the user activates interception. After that single human action, it pauses once, performs one fast final preflight, and sends at most one request. Any preflight failure prevents test traffic.
 5. run-full-validation.ps1 no longer overwrites the packaged JAR by default. The Gradle test task depends on shadowJar, so normal validation adds -x shadowJar. A candidate build requires explicit -BuildCandidate; backup, packaging, and candidate copy are then intentional.
 6. Deadline tests and runner tests keep both session and unattended authorization expiry distinct. The runner never retries an ambiguous request.
+7. The new `run-supervised-reliability-suite.ps1` keeps OFFLINE, LOCAL, and SUPERVISED modes distinct. In SUPERVISED mode it reads identities through authenticated MCP into process memory, verifies all nine targets, starts the fixture, passes setup preflight, asks the existing unattended policy for one 180-second session, then runs one request/drop and verifies cleanup. It never activates unattended mode or retries traffic.
+8. Direct runtime testing found that `initialize()` required a client argument even though production preflight entry points called it without one. It now creates the default MCP client when omitted; direct construction and injection both have regressions. Unexpected errors are returned as bounded, non-secret preflight failures rather than tracebacks.
 
 Detailed root causes and fixes are in [BURP_MCP_BUG_FIX_LOG.md](BURP_MCP_BUG_FIX_LOG.md).
 
@@ -88,7 +94,7 @@ Statuses below distinguish direct current evidence from historical results and o
 | Area | Level | Status | Evidence / limitation |
 |---|---|---|---|
 | MCP connectivity | Live | PASS | Current connection and status tools succeeded. |
-| Authentication | Live + offline | PASS | Bearer required; authenticated calls succeeded; 14 Python and 36 PowerShell assertions passed. |
+| Authentication | Live + offline | PASS | Bearer required; authenticated MCP preflight succeeded; 14 transport tests and 38 PowerShell assertions passed. |
 | Tool registration | Live catalog | PASS | 71 connector entries. |
 | Tool schemas | Catalog metadata | PASS | All 71 entries include a callable signature and required/optional argument extraction. |
 | All 71 tool behaviors | Per-tool | PARTIAL | Seven read-only calls live-verified; 64 are registration/schema verified only. See catalog JSON; no blanket functionality claim. |
@@ -100,6 +106,7 @@ Statuses below distinguish direct current evidence from historical results and o
 | Manual approval serialization | Local mock | PASS | Pending mock approval did not block eight status calls. No live human prompt was triggered. |
 | Phase 4A request cancellation | Live | INCONCLUSIVE | No /test-cancel request was sent. Actual capture, approval source, drop, origin zero-delivery, client result, stale ID, and cleanup still require supervised evidence. |
 | Phase 4A preflight and client classifier | Offline | PASS | Deadline, authentication, byte framing, terminal outcome, wrong ID, duplicate delivery, and no-traffic tests passed. |
+| Supervised coordinator | Offline simulation + live read-only preflight | PARTIAL | 22 actual PowerShell child-process assertions passed. Live preflight confirmed the mode is inactive and stopped before fixture/session; no request was sent. |
 | Phase 4B message timeout | Offline state machine | PASS | Expiry, fail-closed callback behavior, stale decision rejection, and queue cleanup covered. Live timeout remains UNVERIFIED. |
 | Phase 4C session expiry/disable/emergency stop | Offline state machine | PASS | Expiry, disable, emergency cancellation, heartbeat cleanup, and callback release covered. Live variants remain UNVERIFIED. |
 | Phase 4D queue capacity and concurrency | Offline state machine | PASS | Deterministic 1/2/4/8 message isolation and capacity tests passed. Live unattended mode remains limited to two in-flight messages; larger live tests are not authorized. |
@@ -141,16 +148,13 @@ Build metadata says 1.3.2 / 20261101.5-burp2024.1.1.1; the JAR was built with JD
 - Existing JAR SHA-256: 75186ec81d6f9d16c19802368677d4b33d1294d62e020cf338ccc3da5103b1d4.
 - Existing preserved artifacts include the versioned .1 through .4 JARs and hash-named backups. The current .5 JAR remains in place.
 - No JAR rebuild occurred in this validation. No Burp reload is needed because no packaged artifact was changed.
-- The worktree contains validated source/script/test changes and is not clean yet. No secrets or private identities were included in the validation reports. No push has occurred.
-- Local commit status is reported at handoff; no push has occurred.
+- This report records the pre-commit validation state. The reviewed source, test, and documentation changes are committed locally at handoff. No secrets or private identities were included, and no push has occurred.
 - Candidate is suitable to keep for supervised testing, but **not ready to push or claim release-ready** until Phase 4A has live evidence and the remaining supervised protocol/reliability limitations are recorded.
 
 ## Minimum remaining actions
 
-1. In Burp, explicitly activate Unattended Local Test Mode for a fresh 300-second authorization. Do not activate live interception yet.
-2. Use **Copy Test Commands** and execute the copied block. Enter the two identities only at its hidden prompts and the MCP token only if securely prompted.
-3. Wait for SETUP PREFLIGHT PASS. This confirms authentication, fixture identity, scope, queues, build/version, and at least 180 seconds of unattended authorization while interception remains off.
-4. Activate one fresh 300-second live interception session in Burp. If Burp presents its local confirmation, approve it.
-5. Resume the paused PowerShell runner once. It checks both expiries, heartbeat, identities, scope, and empty queues against the 150-second request budget. It sends exactly one request only after all checks pass.
-6. During the request, use the permitted policy to drop the single matching /test-cancel message; capture actual approval mode, DROPPED state, origin non-delivery, bounded client outcome, stale-ID rejection, and queue cleanup. Keep Phase 4A INCONCLUSIVE unless every required item is evidenced.
-7. After Phase 4A, run live 4B/4C/4D only while the explicit authorization remains valid and their individual preconditions pass; otherwise continue offline and record them as pending.
+1. Explicitly activate Unattended Local Test Mode in Burp. The coordinator will not activate or renew it.
+2. Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/run-supervised-reliability-suite.ps1 -Mode SUPERVISED`.
+3. The coordinator securely prompts for an MCP token only if the process token is missing or rejected. It reads the active identities into memory, verifies all nine targets, prepares the fixture, passes setup preflight, requests one 180-second session through the existing policy, sends one `/test-cancel`, drops only the exact eligible request, verifies client/origin/stale-ID/queue evidence, and stops the session when safe.
+4. If the coordinator reports BLOCKED, FAIL, or INCONCLUSIVE, it sends no follow-up request. Inspect the generated `build/reports/supervised-reliability-*.md` and JSON. Phase 4A stays INCONCLUSIVE until every live evidence item passes.
+5. Continue live 4B/4C/4D only while the current explicit authorization remains valid and their individual preconditions pass; otherwise retain their offline results and mark live behavior UNVERIFIED.

@@ -158,6 +158,14 @@ with open(os.environ['PHASE4A_ARGUMENT_CAPTURE'], 'w', encoding='utf-8') as f:
     Assert-Equal 'phase 4a simulation' $multipleArguments[1] 'arguments containing spaces should preserve their value'
     Assert-Equal '3' $multipleArguments[3] 'the final preflight argument should be preserved'
 
+    $identityJson = '{"testRunId":"11111111-2222-3333-4444-555555555555","serverIdentity":"' + ('S' * 43) + '"}'
+    $captureResult = New-ProcessResult -ExitCode 0 -StdOut $identityJson
+    $captureInvoker = New-FakeInvoker -Responses @($captureResult)
+    $capturedIdentityResult = Invoke-CancelTestPreflightProcess -PythonPath 'python.exe' -PreflightScript 'preflight.py' `
+        -PreflightArguments @('--coordinator-identities', '180') -ReturnResult -ProcessInvoker $captureInvoker.Invoker
+    Assert-Equal $identityJson $capturedIdentityResult.StdOut 'coordinator identity output should be returned to the parent process for in-memory handling'
+    Assert-Equal 0 $capturedIdentityResult.ExitCode 'coordinator capture should preserve the native child exit code'
+
     $stderrChildSource = @'
 import sys
 sys.stderr.write('synthetic python stderr\n')

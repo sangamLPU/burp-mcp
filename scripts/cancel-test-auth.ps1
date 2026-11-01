@@ -169,6 +169,7 @@ function Invoke-CancelTestPreflightProcess {
         [Parameter(Mandatory = $true)] [string]$PreflightScript,
         [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [string[]]$PreflightArguments,
         [switch]$PromptForMcpToken,
+        [switch]$ReturnResult,
         [scriptblock]$ProcessInvoker,
         [scriptblock]$SecurePrompt
     )
@@ -193,6 +194,7 @@ function Invoke-CancelTestPreflightProcess {
         $result = Invoke-CancelTestNativeProcess -ExecutablePath $PythonPath -Arguments $arguments
     }
     if ($result.ExitCode -eq 0) {
+        if ($ReturnResult) { return $result }
         if (-not [string]::IsNullOrWhiteSpace($result.StdOut)) { Write-Host $result.StdOut.Trim() }
         return
     }
@@ -209,6 +211,7 @@ function Invoke-CancelTestPreflightProcess {
             $result = Invoke-CancelTestNativeProcess -ExecutablePath $PythonPath -Arguments $arguments
         }
         if ($result.ExitCode -eq 0) {
+            if ($ReturnResult) { return $result }
             if (-not [string]::IsNullOrWhiteSpace($result.StdOut)) { Write-Host $result.StdOut.Trim() }
             return
         }

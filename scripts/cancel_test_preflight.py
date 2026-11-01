@@ -13,6 +13,7 @@ import os
 import re
 import socket
 import sys
+import time
 
 
 MCP_HOST = "127.0.0.1"
@@ -21,6 +22,18 @@ MCP_PATH = "/mcp"
 PROXY_HOST = "127.0.0.1"
 PROXY_PORT = 8080
 TARGET_URL = "http://127.0.0.1:8000/test-cancel"
+LOCAL_TEST_PATHS = (
+    "/test-html",
+    "/test-post",
+    "/test-form",
+    "/test-upload",
+    "/test-cancel",
+    "/test-timeout",
+    "/test-session-expiry",
+    "/test-concurrent-a",
+    "/test-concurrent-b",
+)
+LOCAL_TEST_URLS = tuple(f"http://127.0.0.1:8000{path}" for path in LOCAL_TEST_PATHS)
 HEALTH_PATH = "/__phase4a-health"
 HEALTH_BODY = b"MCP_LOCAL_TEST_SERVER_READY"
 EXPECTED_BUILD_ID = "20261101.5-burp2024.1.1.1"
@@ -171,15 +184,22 @@ def validate_setup_snapshot(snapshot, unattended_run_id=None, unattended_server_
 
 
 def validate_mcp_snapshot(snapshot, minimum_remaining_ms=MIN_REMAINING_MS,
-                          unattended_run_id=None, unattended_server_identity=None):
+                          unattended_run_id=None, unattended_server_identity=None,
+                          minimum_session_lifetime_seconds=300):
     """Return safe, user-readable failed checks for an active-session snapshot."""
     failures, interception = _validate_snapshot_basics(snapshot)
     if interception.get("enabled") is not True:
         failures.append("Live interception is not active")
     if interception.get("heartbeatHealth") != "HEALTHY":
         failures.append("Live interception heartbeat is not healthy")
-    if interception.get("sessionLifetimeSeconds") != 300:
-        failures.append("Live interception is not the requested 300-second session")
+    try:
+        session_lifetime_seconds = int(interception.get("sessionLifetimeSeconds", 0))
+    except (TypeError, ValueError):
+        session_lifetime_seconds = 0
+    if session_lifetime_seconds < minimum_session_lifetime_seconds:
+        failures.append(
+            f"Live interception lifetime is below the requested {minimum_session_lifetime_seconds}-second minimum"
+        )
     if interception.get("sessionEndReason") != "NONE":
         failures.append("Live interception session has ended or is ending")
     if interception.get("timeoutSeconds") != INTERCEPTED_MESSAGE_TIMEOUT_MS // 1000:
@@ -351,7 +371,7 @@ class McpClient:
 def read_mcp_snapshot(client):
     connection = client.tool("burp_check_connection", includeBurpVersion=True)
     server = client.tool("burp_get_status", includeDiagnostics=False)
-    scope = client.tool("burp_get_scope", urls=[TARGET_URL])
+    scope = client.tool("burp_get_scope", urls=list(LOCAL_TEST_URLS))
     interception = client.tool("burp_get_intercept_status", includeDiagnostics=False)
     requests = client.tool("burp_list_pending_requests", includeDiagnostics=False)
     responses = client.tool("burp_list_pending_responses", includeDiagnostics=False)
@@ -363,6 +383,279 @@ def read_mcp_snapshot(client):
         "requests": requests,
         "responses": responses,
     }
+
+
+def _all_local_targets_eligible(snapshot):
+    scope = snapshot.get("scope")
+    checks = scope.get("checks") if isinstance(scope, dict) else None
+    if not isinstance(checks, list):
+        return False, "localhost scope results are missing"
+    by_url = {item.get("url"): item for item in checks if isinstance(item, dict)}
+    if len(by_url) != len(LOCAL_TEST_URLS) or set(by_url) != set(LOCAL_TEST_URLS):
+        return False, "scope results do not match the nine fixed localhost targets"
+    if any(
+        by_url[url].get("inBurpScope") is not True
+        or by_url[url].get("hostAllowlisted") is not True
+        or by_url[url].get("eligible") is not True
+        for url in LOCAL_TEST_URLS
+    ):
+        return False, "one or more fixed localhost targets are not scope- and allowlist-eligible"
+    return True, None
+
+
+def _identity_values(mode):
+    if not isinstance(mode, dict) or mode.get("active") is not True:
+        raise PreflightError("Unattended local test mode is not active; no session was requested")
+    run_id = mode.get("testRunId")
+    server_identity = mode.get("serverIdentity")
+    if not isinstance(run_id, str) or not re.fullmatch(
+        r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}", run_id
+    ):
+        raise PreflightError("Active Burp run identity is missing or malformed")
+    if not isinstance(server_identity, str) or not TOKEN_PATTERN.fullmatch(server_identity):
+        raise PreflightError("Active Burp server identity is missing or malformed")
+    return run_id, server_identity
+
+
+def discover_active_identities(minimum_authorization_ms):
+    """Return active identities to a parent process for in-memory environment handoff only."""
+    client = initialize()
+    snapshot = read_mcp_snapshot(client)
+    mode = snapshot.get("interception", {}).get("unattendedMode")
+    run_id, server_identity = _identity_values(mode)
+    failures = validate_setup_snapshot(snapshot, run_id, server_identity)
+    scope_ok, scope_failure = _all_local_targets_eligible(snapshot)
+    if scope_failure:
+        failures.append(scope_failure)
+    if snapshot.get("server", {}).get("authorizedTargetCount") != 1:
+        failures.append("MCP allowlist does not contain exactly the configured localhost target")
+    remaining = mode.get("remainingMillis", 0)
+    try:
+        remaining = int(remaining)
+    except (TypeError, ValueError):
+        remaining = 0
+    if remaining < minimum_authorization_ms:
+        failures.append(
+            f"Unattended authorization has less than {minimum_authorization_ms // 1000}s "
+            "for fixture setup and a bounded live session"
+        )
+    if failures:
+        raise PreflightError("; ".join(dict.fromkeys(failures)))
+    return {
+        "testRunId": run_id,
+        "serverIdentity": server_identity,
+        "scopeEligibleCount": len(LOCAL_TEST_URLS),
+        "authorizationRemainingMillis": remaining,
+        "identitiesReturnedOnStdout": True,
+    }
+
+
+def start_supervised_session(session_lifetime_seconds):
+    """Request one policy-bounded session only when unattended policy can auto-authorize it."""
+    if session_lifetime_seconds < 150 or session_lifetime_seconds > 600:
+        raise PreflightError("Requested session lifetime must be between 150 and 600 seconds")
+    client = initialize()
+    expected_run_id, expected_server_identity = unattended_identity_from_environment()
+    if expected_run_id is None:
+        raise PreflightError("Active unattended identities are required; no session was requested")
+    snapshot = read_mcp_snapshot(client)
+    failures = validate_setup_snapshot(snapshot, expected_run_id, expected_server_identity)
+    scope_ok, scope_failure = _all_local_targets_eligible(snapshot)
+    if scope_failure:
+        failures.append(scope_failure)
+    if snapshot.get("server", {}).get("authorizedTargetCount") != 1:
+        failures.append("MCP allowlist does not contain exactly the configured localhost target")
+    mode = snapshot.get("interception", {}).get("unattendedMode", {})
+    try:
+        authorization_remaining = int(mode.get("remainingMillis", 0))
+    except (TypeError, ValueError):
+        authorization_remaining = 0
+    # The requested duration must fit the authorization, with a small transport margin.
+    required_authorization_ms = session_lifetime_seconds * 1000 + 10_000
+    if authorization_remaining < required_authorization_ms:
+        failures.append(
+            f"Unattended authorization has less than {required_authorization_ms // 1000}s "
+            "to authorize the requested interception lifetime"
+        )
+    if failures:
+        raise PreflightError("; ".join(dict.fromkeys(failures)) + "; no session was requested")
+
+    client.tool(
+        "burp_set_live_interception_state",
+        enabled=True,
+        sessionLifetimeSeconds=session_lifetime_seconds,
+    )
+    interception = client.tool("burp_get_intercept_status", includeDiagnostics=False)
+    verification_snapshot = dict(snapshot)
+    verification_snapshot["interception"] = interception
+    final_failures = validate_mcp_snapshot(
+        verification_snapshot,
+        unattended_run_id=expected_run_id,
+        unattended_server_identity=expected_server_identity,
+        minimum_session_lifetime_seconds=session_lifetime_seconds,
+    )
+    if final_failures:
+        raise PreflightError("Session start did not pass final checks: " + "; ".join(final_failures))
+    return {
+        "enabled": True,
+        "heartbeatHealth": interception.get("heartbeatHealth"),
+        "sessionLifetimeSeconds": interception.get("sessionLifetimeSeconds"),
+        "sessionRemainingMillis": interception.get("sessionRemainingMillis"),
+        "authorizationRemainingMillis": interception.get("unattendedMode", {}).get("remainingMillis"),
+        "pendingRequests": interception.get("pendingRequests"),
+        "pendingResponses": interception.get("pendingResponses"),
+    }
+
+
+def _raw_tool(client, name, arguments):
+    result = client.rpc("tools/call", {"name": name, "arguments": arguments})
+    if not isinstance(result, dict):
+        raise PreflightError(f"MCP {name} returned a malformed tool result")
+    return result
+
+
+def _expect_stale_id_rejected(client, name, arguments):
+    result = _raw_tool(client, name, arguments)
+    if result.get("isError") is not True:
+        raise PreflightError(f"Dropped message ID was unexpectedly accepted by {name}")
+
+
+def drop_matching_request(wait_seconds=35):
+    """Drop exactly one held GET /test-cancel and verify policy, stale ID, and queue evidence."""
+    client = initialize()
+    expected_run_id, expected_server_identity = unattended_identity_from_environment()
+    if expected_run_id is None:
+        raise PreflightError("Active unattended identities are required; no held message was changed")
+    deadline = time.monotonic() + max(1, min(wait_seconds, 45))
+    ticket = None
+    while time.monotonic() < deadline:
+        pending = client.tool("burp_list_pending_requests", includeDiagnostics=False)
+        if not isinstance(pending, list):
+            raise PreflightError("Pending request listing is malformed; no message was dropped")
+        if pending:
+            if len(pending) != 1:
+                raise PreflightError("Unexpected request queue contents; no message was dropped")
+            candidate = pending[0]
+            if (
+                not isinstance(candidate, dict)
+                or candidate.get("kind", "request") != "request"
+                or candidate.get("method") != "GET"
+                or candidate.get("hostname") != "127.0.0.1"
+                or candidate.get("urlPath") != "/test-cancel"
+                or not isinstance(candidate.get("id"), str)
+                or not candidate.get("id")
+                or not isinstance(candidate.get("revision"), int)
+            ):
+                raise PreflightError("The only held request is not the exact synthetic cancellation target")
+            ticket = candidate
+            break
+        time.sleep(0.5)
+    if ticket is None:
+        raise PreflightError("No matching /test-cancel request arrived before the bounded queue wait ended")
+
+    status = client.tool("burp_get_intercept_status", includeDiagnostics=False)
+    mode = status.get("unattendedMode", {}) if isinstance(status, dict) else {}
+    if (
+        status.get("enabled") is not True
+        or status.get("heartbeatHealth") != "HEALTHY"
+        or status.get("sessionEndReason") != "NONE"
+        or status.get("timeoutSeconds") != INTERCEPTED_MESSAGE_TIMEOUT_MS // 1000
+        or status.get("pendingRequests") != 1
+        or status.get("pendingResponses") != 0
+        or mode.get("active") is not True
+        or mode.get("testRunId") != expected_run_id
+        or mode.get("serverIdentity") != expected_server_identity
+        or int(status.get("sessionRemainingMillis", 0)) < MIN_REMAINING_MS
+        or int(mode.get("remainingMillis", 0)) < MIN_REMAINING_MS
+        or int(status.get("leaseRemainingMillis", 0)) <= 0
+    ):
+        raise PreflightError("Live session or unattended authorization is no longer eligible; held request was not changed")
+    scope = client.tool("burp_get_scope", urls=[TARGET_URL])
+    checks = scope.get("checks", []) if isinstance(scope, dict) else []
+    if len(checks) != 1 or checks[0].get("url") != TARGET_URL or checks[0].get("eligible") is not True:
+        raise PreflightError("/test-cancel lost exact scope eligibility; held request was not changed")
+
+    result = _raw_tool(client, "burp_drop_intercepted_request", {"id": ticket["id"]})
+    if result.get("isError") is True:
+        raise PreflightError("Burp did not approve the exact held request drop")
+    content_text = " ".join(
+        item.get("text", "") for item in result.get("content", [])
+        if isinstance(item, dict) and item.get("type") == "text"
+    )
+    if "DROPPED" not in content_text.upper():
+        raise PreflightError("Burp did not report the requested held request as dropped")
+
+    final_status = client.tool("burp_get_intercept_status", includeDiagnostics=False)
+    requests = client.tool("burp_list_pending_requests", includeDiagnostics=False)
+    responses = client.tool("burp_list_pending_responses", includeDiagnostics=False)
+    diagnostics = client.tool("burp_get_intercept_diagnostics", count=100)
+    events = diagnostics.get("events", []) if isinstance(diagnostics, dict) else []
+    drop_marker = f"request {ticket['id']} revision={ticket['revision']}"
+    policy_marker = f"message={ticket['id']} revision={ticket['revision']}"
+    drop_event = any(
+        isinstance(event, dict)
+        and event.get("action") == "intercept_drop"
+        and event.get("outcome") == "dropped"
+        and drop_marker in str(event.get("detail", ""))
+        for event in events
+    )
+    auto_event = any(
+        isinstance(event, dict)
+        and event.get("action") == "unattended_local_test"
+        and event.get("outcome") == "auto_approved"
+        and "operation=DROP_REQUEST" in str(event.get("detail", ""))
+        and "path=/test-cancel" in str(event.get("detail", ""))
+        and policy_marker in str(event.get("detail", ""))
+        for event in events
+    )
+    if final_status.get("pendingRequests") != 0 or final_status.get("pendingResponses") != 0 or requests or responses:
+        raise PreflightError("Dropped message did not leave both interception queues empty")
+    if not drop_event:
+        raise PreflightError("Burp diagnostics do not confirm DROPPED for the matching request revision")
+
+    _expect_stale_id_rejected(client, "burp_get_intercepted_request", {"id": ticket["id"]})
+    _expect_stale_id_rejected(client, "burp_propose_intercepted_request_edit", {
+        "id": ticket["id"], "revision": ticket["revision"], "headers": {}, "removeHeaders": [],
+    })
+    _expect_stale_id_rejected(client, "burp_forward_intercepted_request", {
+        "id": ticket["id"], "revision": ticket["revision"],
+    })
+    return {
+        "dropState": "DROPPED",
+        "approvalMode": "AUTOMATIC" if auto_event else "UNATTRIBUTED",
+        "automaticApprovalEvidence": auto_event,
+        "staleGetRejected": True,
+        "staleEditRejected": True,
+        "staleForwardRejected": True,
+        "pendingRequests": 0,
+        "pendingResponses": 0,
+    }
+
+
+def stop_session_if_safe():
+    """Stop only this mode-bound session after both queues are empty; never invoke the emergency dialog."""
+    client = initialize()
+    status = client.tool("burp_get_intercept_status", includeDiagnostics=False)
+    if status.get("enabled") is not True:
+        return {"stopped": True, "alreadyInactive": True}
+    mode = status.get("unattendedMode", {})
+    expected_run_id, expected_server_identity = unattended_identity_from_environment()
+    if (
+        expected_run_id is None
+        or mode.get("active") is not True
+        or mode.get("testRunId") != expected_run_id
+        or mode.get("serverIdentity") != expected_server_identity
+    ):
+        raise PreflightError("Active session is not bound to the supplied live unattended identities; it was left unchanged")
+    requests = client.tool("burp_list_pending_requests", includeDiagnostics=False)
+    responses = client.tool("burp_list_pending_responses", includeDiagnostics=False)
+    if requests or responses or status.get("pendingRequests") != 0 or status.get("pendingResponses") != 0:
+        raise PreflightError("Queues are not empty; active interception was left unchanged")
+    client.tool("burp_set_live_interception_state", enabled=False)
+    final_status = client.tool("burp_get_intercept_status", includeDiagnostics=False)
+    if final_status.get("enabled") is not False:
+        raise PreflightError("Interception stop did not complete")
+    return {"stopped": True, "alreadyInactive": False, "pendingRequests": 0, "pendingResponses": 0}
 
 
 def check_proxy_listener():
@@ -400,7 +693,8 @@ def check_test_server_health(expected_run_id=None, expected_server_identity=None
         connection.close()
 
 
-def initialize(client):
+def initialize(client=None):
+    client = client or McpClient()
     initialized = client.rpc(
         "initialize",
         {
@@ -467,7 +761,7 @@ def run_setup_preflight():
     )
 
 
-def run_preflight():
+def run_preflight(minimum_session_lifetime_seconds=300):
     client = initialize()
     expected_run_id, expected_server_identity = unattended_identity_from_environment()
     if expected_run_id is None:
@@ -477,8 +771,12 @@ def run_preflight():
     check_test_server_health(expected_run_id, expected_server_identity)
 
     final_snapshot = read_mcp_snapshot(client)
-    failures = validate_mcp_snapshot(final_snapshot, unattended_run_id=expected_run_id,
-                                     unattended_server_identity=expected_server_identity)
+    failures = validate_mcp_snapshot(
+        final_snapshot,
+        unattended_run_id=expected_run_id,
+        unattended_server_identity=expected_server_identity,
+        minimum_session_lifetime_seconds=minimum_session_lifetime_seconds,
+    )
     if failures:
         raise PreflightError("; ".join(failures))
 
@@ -504,11 +802,48 @@ def main(argv=None):
             run_setup_preflight()
         elif not args:
             run_preflight()
+        elif len(args) == 2 and args[0] == "--minimum-session-seconds":
+            try:
+                seconds = int(args[1])
+            except ValueError as error:
+                raise PreflightError("Minimum session duration must be an integer") from error
+            if seconds < 150 or seconds > 600:
+                raise PreflightError("Minimum session duration must be between 150 and 600 seconds")
+            run_preflight(minimum_session_lifetime_seconds=seconds)
+        elif len(args) == 2 and args[0] == "--coordinator-identities":
+            try:
+                requested_seconds = int(args[1])
+            except ValueError as error:
+                raise PreflightError("Requested session duration must be an integer") from error
+            if requested_seconds < 150 or requested_seconds > 600:
+                raise PreflightError("Requested session duration must be between 150 and 600 seconds")
+            identities = discover_active_identities(requested_seconds * 1000 + 15_000)
+            print(json.dumps(identities, separators=(",", ":")))
+        elif len(args) == 2 and args[0] == "--start-session":
+            try:
+                seconds = int(args[1])
+            except ValueError as error:
+                raise PreflightError("Requested session duration must be an integer") from error
+            print(json.dumps(start_supervised_session(seconds), separators=(",", ":")))
+        elif len(args) == 2 and args[0] == "--drop-matching-request":
+            try:
+                wait_seconds = int(args[1])
+            except ValueError as error:
+                raise PreflightError("Queue wait duration must be an integer") from error
+            print(json.dumps(drop_matching_request(wait_seconds), separators=(",", ":")))
+        elif args == ["--stop-session-if-safe"]:
+            print(json.dumps(stop_session_if_safe(), separators=(",", ":")))
         else:
             raise PreflightError("Unsupported preflight option; request was not sent")
     except PreflightError as error:
         print(f"PREFLIGHT FAIL: {error}; request was not sent.", file=sys.stderr)
         return 2
+    except Exception as error:
+        print(
+            f"PREFLIGHT FAIL: internal preflight error ({type(error).__name__}); request was not sent.",
+            file=sys.stderr,
+        )
+        return 3
     return 0
 
 
