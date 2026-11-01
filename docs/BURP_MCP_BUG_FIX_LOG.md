@@ -21,6 +21,10 @@ The historical audit reproduced a service-wide MCP stall while TCP listeners rem
 
 Source review confirms Ktor/Netty handles MCP requests; KtorServerManager's single-thread executor serializes server lifecycle start/stop work. DecisionQueue waits without holding its synchronized lock and are bounded by the message deadline. These findings do not establish why the historical service-wide freeze occurred.
 
+## Desktop-control limitation
+
+The supported `cua.getState()` and `cua.listWindows()` calls both failed with `Computer Use native pipe is unavailable: failed to connect native pipe: The system cannot find the file specified`; the browser access host was also unavailable. A fresh `cua_repl` reset and reconnect did not restore access. The local Codex computer-use helper process and a matching named-pipe endpoint were visible to the project shell, so this is a host/API connection failure rather than an absent helper process. No direct named-pipe client, alternate UI automation, or security-setting change was attempted. Burp's activation control could not be observed or operated, leaving live unattended testing blocked.
+
 ## No extension-side defect requiring a JAR rebuild
 
 The defects fixed in this validation cycle are in Python/PowerShell preflight/orchestration and the Gradle validation coordinator. The current .5 runtime matches gradle.properties and the existing JAR manifest. No JAR was rebuilt, and no Burp reload is required for these script-only repairs.
@@ -37,9 +41,9 @@ The top-level OFFLINE/LOCAL coordinator now reads the full validation JSON count
 
 ## Validation references
 
-- Latest full LOCAL report: ../build/reports/full-validation/validation-6bc7c1a72e834360ad8387565a1d085c.json
+- Latest full LOCAL report: ../build/reports/full-validation/validation-f3caf344080f419789e343edcb8d8bb6.json
 - Latest full OFFLINE report: ../build/reports/full-validation/validation-29830fabd6a748e490fc9d2aa79f29c1.json
-- Supervised preflight report: ../build/reports/supervised-reliability-20261101T070522Z-3daa0046.json
+- Latest supervised preflight report: ../build/reports/supervised-reliability-20261101T072516Z-8740b7cd.json
 - Full OFFLINE report: ../build/reports/full-validation/validation-6abf0e7fb826423ea699ea968b6f6aa1.json
 - Tool catalog audit: ../build/reports/tool-catalog-audit.json
 - Full coverage matrix: COMPLETE_BURP_MCP_VALIDATION.md

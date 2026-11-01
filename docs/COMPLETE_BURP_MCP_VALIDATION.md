@@ -20,9 +20,9 @@ The latest LOCAL run completed **21 PASS, 0 FAIL, 0 BLOCKED, 0 INCONCLUSIVE, 2 U
 The packaged JAR was not rebuilt or replaced. Its SHA-256 remained 75186ec81d6f9d16c19802368677d4b33d1294d62e020cf338ccc3da5103b1d4. The coordinator now excludes shadowJar by default; candidate packaging requires an explicit -BuildCandidate.
 
 Machine-readable results:
-- [Latest LOCAL coordinator report](../build/reports/full-validation/validation-6bc7c1a72e834360ad8387565a1d085c.json)
+- [Latest LOCAL coordinator report](../build/reports/full-validation/validation-f3caf344080f419789e343edcb8d8bb6.json)
 - [Latest OFFLINE coordinator report](../build/reports/full-validation/validation-29830fabd6a748e490fc9d2aa79f29c1.json)
-- [SUPERVISED preflight report](../build/reports/supervised-reliability-20261101T070522Z-3daa0046.json)
+- [Latest SUPERVISED preflight report](../build/reports/supervised-reliability-20261101T072516Z-8740b7cd.json)
 - [OFFLINE coordinator report](../build/reports/full-validation/validation-6abf0e7fb826423ea699ea968b6f6aa1.json)
 - [71-tool catalog and input signatures](../build/reports/tool-catalog-audit.json)
 - [Mission summary JSON](../build/reports/burp-mcp-validation-summary.json)
@@ -41,7 +41,7 @@ Machine-readable results:
 | Unattended Local Test Mode | OFF | active=false, no current identities, remaining time zero. It was not activated by this validation. |
 | Pending request queue | PASS, live | Empty. |
 | Pending response queue | PASS, live | Empty. |
-| Run ID/server identity copy controls | PASS, component tests; GUI UNVERIFIED | JUnit covers presence, read-only Run ID, masked server identity, current-state recheck, secure copy commands, and conditional clipboard cleanup. The desktop automation backend was unavailable, so this run did not visually inspect the loaded Burp window or click a copy control. |
+| Run ID/server identity copy controls | PASS, component tests; GUI UNVERIFIED | JUnit covers presence, read-only Run ID, masked server identity, current-state recheck, secure copy commands, and conditional clipboard cleanup. `cua.getState()` and `cua.listWindows()` failed with the native-pipe-unavailable error after a clean reconnect; the helper process and a matching pipe are visible locally, but the supported API cannot connect. No control was clicked or clipboard changed. |
 | Local fixture | PASS, local | The bounded fixture and identity-enforcement regressions passed; port 8000 was released after testing. |
 | MCP responsiveness | PASS now; freeze unresolved | Live read-only calls returned successfully. Local integration tests passed eight cases, including eight concurrent status calls while a mock approval was pending. The historical service-wide freeze was not reproduced and its root cause is still unknown. |
 
@@ -51,11 +51,11 @@ The seven live-verification tool calls were burp_check_connection, burp_get_stat
 
 ### Full LOCAL validation
 
-Coordinator run ID: 6bc7c1a72e834360ad8387565a1d085c.
+Coordinator run ID: f3caf344080f419789e343edcb8d8bb6.
 
 - 21 coordinator checks passed; no coordinator failures or blocked items. The wrapper aggregate is INCONCLUSIVE because two checks remain unverified.
 - Two items remain UNVERIFIED by design: approval-gated live Burp behavior and creation of a new candidate JAR.
-- A forced Gradle execution after that coordinator run passed 182 JUnit tests, with no failures, errors, or skipped tests. The direct command excluded shadowJar and did not rebuild the JAR.
+- This LOCAL coordinator run completed in 52.81 seconds with 21 PASS, 0 FAIL, 0 BLOCKED, 0 INCONCLUSIVE, and 2 UNVERIFIED. A forced Gradle execution in the same validation cycle passed 182 JUnit tests, with no failures, errors, or skipped tests. The direct command excluded shadowJar and did not rebuild the JAR.
 - The JUnit set includes eight local MCP integration tests: bearer rejection, tool listing, input validation, safe disclosure behavior, pending approval serialization, graceful shutdown, and concurrent status responsiveness.
 - The server fixture reported 23 local cases passed; the separate identity-enforcement script exited successfully.
 - JAR packaging was excluded. Existing manifest identity and SHA-256 were checked read-only.
@@ -153,8 +153,7 @@ Build metadata says 1.3.2 / 20261101.5-burp2024.1.1.1; the JAR was built with JD
 
 ## Minimum remaining actions
 
-1. Explicitly activate Unattended Local Test Mode in Burp. The coordinator will not activate or renew it.
-2. Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/run-supervised-reliability-suite.ps1 -Mode SUPERVISED`.
-3. The coordinator securely prompts for an MCP token only if the process token is missing or rejected. It reads the active identities into memory, verifies all nine targets, prepares the fixture, passes setup preflight, requests one 180-second session through the existing policy, sends one `/test-cancel`, drops only the exact eligible request, verifies client/origin/stale-ID/queue evidence, and stops the session when safe.
-4. If the coordinator reports BLOCKED, FAIL, or INCONCLUSIVE, it sends no follow-up request. Inspect the generated `build/reports/supervised-reliability-*.md` and JSON. Phase 4A stays INCONCLUSIVE until every live evidence item passes.
-5. Continue live 4B/4C/4D only while the current explicit authorization remains valid and their individual preconditions pass; otherwise retain their offline results and mark live behavior UNVERIFIED.
+1. The supported desktop-control API currently cannot connect to its native pipe, so GUI automation is blocked. A human must enable Unattended Local Test Mode in Burp; no attempt was made to bypass that UI requirement.
+2. After the mode is active, run or authorize the coordinator command `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/run-supervised-reliability-suite.ps1 -Mode SUPERVISED`. It handles identity, fixture, session, one-shot traffic, policy drop, and verification. If Burp presents a confirmation that requires a physically present human, that confirmation must be handled locally.
+3. The latest SUPERVISED attempt authenticated and stopped before fixture/session startup because unattended mode was inactive. It sent no request. Phase 4A stays INCONCLUSIVE until every live evidence item passes.
+4. Continue live 4B/4C/4D only while the current explicit authorization remains valid and their individual preconditions pass; otherwise retain their offline results and mark live behavior UNVERIFIED.
