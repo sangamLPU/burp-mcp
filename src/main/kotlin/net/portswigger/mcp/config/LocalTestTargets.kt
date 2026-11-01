@@ -5,6 +5,7 @@ object LocalTestTargets {
     const val HOST = "127.0.0.1"
     const val PORT = 8000
     const val ALLOWLIST_ENTRY = "$HOST:$PORT"
+    const val RULE_AUTHORITY_URL = "http://$HOST:$PORT"
 
     val paths = listOf(
         "/test-html",

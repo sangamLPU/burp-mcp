@@ -28,7 +28,11 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import net.portswigger.mcp.config.McpConfig
+import net.portswigger.mcp.config.LocalTestTargets
 import net.portswigger.mcp.intercept.LiveInterception
+import net.portswigger.mcp.intercept.LocalTestManagementOperation
+import net.portswigger.mcp.intercept.LocalTestPolicyDecision
+import net.portswigger.mcp.security.ActivityLog
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
@@ -119,7 +123,7 @@ class McpServerIntegrationTest {
             
             val tools = client.listTools()
             assertFalse(tools.isEmpty(), "Server should have registered tools")
-            assertEquals(71, tools.size, "The Professional MCP catalog must retain the existing tools and the approved localhost scope helper")
+            assertEquals(86, tools.size, "The Professional MCP catalog must retain the existing tools and expose the bounded interception-rule API")
             assertEquals(tools.size, tools.map { it.name }.toSet().size, "MCP tool names must be unique")
             val expectedToolNames = setOf(
                 "base64_decode", "base64_encode",
@@ -134,6 +138,11 @@ class McpServerIntegrationTest {
                 "burp_get_project_info", "burp_get_proxy_history", "burp_get_repeater_tabs", "burp_get_request",
                 "burp_get_response", "burp_get_response_headers", "burp_get_scan_status", "burp_get_scanner_issues",
                 "burp_get_scope", "burp_get_site_map", "burp_get_status", "burp_list_pending_requests",
+                "burp_create_interception_rule", "burp_list_interception_rules", "burp_get_interception_rule",
+                "burp_update_interception_rule", "burp_enable_interception_rule", "burp_disable_interception_rule",
+                "burp_delete_interception_rule", "burp_clear_interception_rules", "burp_preview_interception_rule",
+                "burp_get_interception_rule_stats", "burp_get_interception_rule_events", "burp_get_rule_engine_status",
+                "burp_clear_interception_rule_stats", "burp_pause_all_interception_rules", "burp_emergency_stop_rules",
                 "burp_list_pending_responses", "burp_modify_request", "burp_propose_intercepted_request_edit",
                 "burp_propose_intercepted_response_edit", "burp_request_intercept_disclosure",
                 "burp_search_http_history", "burp_send_http_request", "burp_send_to_repeater",
@@ -190,6 +199,72 @@ class McpServerIntegrationTest {
         } finally {
             httpClient.close()
         }
+    }
+
+    @Test
+    fun `nested interception rule schema and authenticated create workflow work`() = runBlocking {
+        every { persistedObject.getBoolean("readOnlyMode") } returns false
+        every { persistedObject.getString("_autoApproveTargets") } returns LocalTestTargets.ALLOWLIST_ENTRY
+        config.readOnlyMode = false
+        config.autoApproveTargets = LocalTestTargets.ALLOWLIST_ENTRY
+        every { api.scope().isInScope(any()) } returns true
+        val createTool = client.listTools().single { it.name == "burp_create_interception_rule" }
+        val specSchema = createTool.inputSchema.properties?.get("spec") as JsonObject
+        assertTrue(specSchema["properties"]!!.jsonObject.containsKey("conditions"))
+        assertTrue(specSchema["properties"]!!.jsonObject.containsKey("maximumModifications"))
+        val transformationSchema = specSchema["properties"]!!.jsonObject["transformations"]!!.jsonObject
+        assertEquals("array", transformationSchema["type"]!!.jsonPrimitive.content)
+        val itemSchema = transformationSchema["items"]!!.jsonObject
+        assertTrue(itemSchema["properties"]!!.jsonObject.containsKey("type"))
+
+        live.activateUnattendedLocalTestMode(60)
+        val runId = live.unattendedSnapshot().testRunId!!
+        assertEquals(listOf(LocalTestTargets.ALLOWLIST_ENTRY), config.getAutoApproveTargetsList())
+        assertEquals(LocalTestPolicyDecision.AUTO_APPROVE,
+            live.unattendedManagementDecision(LocalTestManagementOperation.CONFIGURE_RULE).decision)
+        val created = client.callTool("burp_create_interception_rule", mapOf(
+            "spec" to mapOf(
+                "name" to "Enable synthetic JSON field",
+                "targetUrl" to LocalTestTargets.urls.first(),
+                "authorizationReference" to runId,
+                "direction" to "REQUEST",
+                "conditions" to mapOf("jsonPath" to "$.enabled", "jsonValueJson" to "false"),
+                "transformations" to listOf(mapOf("type" to "SET_JSON_FIELD", "path" to "$.enabled", "valueJson" to "true")),
+                "action" to "MODIFY_AND_FORWARD",
+                "priority" to 100,
+                "maximumMatches" to 5,
+                "maximumModifications" to 4,
+                "durationSeconds" to 60
+            )
+        ))!!
+        assertFalse(created.isError == true, created.content.toString())
+        assertTrue(created.content.toString().contains("DISABLED"))
+        assertTrue(created.content.toString().contains("maximumModifications"))
+
+        val listed = client.callTool("burp_list_interception_rules", mapOf("includeDiagnostics" to false))!!
+        assertFalse(listed.isError == true)
+        assertTrue(listed.content.toString().contains("Enable synthetic JSON field"))
+        val engineStatus = client.callTool("burp_get_rule_engine_status", mapOf("includeDiagnostics" to false))!!
+        assertFalse(engineStatus.isError == true, engineStatus.content.toString())
+        assertTrue(engineStatus.content.toString().contains("maximumModificationsPerRule"))
+        val ruleId = Json.parseToJsonElement((created.content.single() as TextContent).text)
+            .jsonObject["id"]!!.jsonPrimitive.content
+        live.allowEdits = true
+        live.startApprovedSession(60)
+        val enabled = client.callTool("burp_enable_interception_rule", mapOf("ruleId" to ruleId))!!
+        assertFalse(enabled.isError == true, enabled.content.toString())
+        assertTrue(enabled.content.toString().contains("ACTIVE"))
+        val stats = client.callTool("burp_get_interception_rule_stats", mapOf("ruleId" to ruleId))!!
+        assertFalse(stats.isError == true, stats.content.toString())
+        assertTrue(stats.content.toString().contains("remainingModifications"))
+        val paused = client.callTool("burp_disable_interception_rule", mapOf("ruleId" to ruleId))!!
+        assertFalse(paused.isError == true, paused.content.toString())
+        assertTrue(paused.content.toString().contains("PAUSED"))
+        val deleted = client.callTool("burp_delete_interception_rule", mapOf("ruleId" to ruleId))!!
+        assertFalse(deleted.isError == true, deleted.content.toString())
+        live.disable("TEST_CLEANUP")
+        live.deactivateUnattendedLocalTestMode("TEST_CLEANUP")
+        Unit
     }
 
     @Test

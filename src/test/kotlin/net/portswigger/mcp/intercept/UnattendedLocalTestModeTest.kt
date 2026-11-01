@@ -90,6 +90,18 @@ class UnattendedLocalTestModeTest {
     }
 
     @Test
+    fun `atomic policy commit does not run when authorization expires`() {
+        start()
+        val authorizedContext = context()
+        var committed = false
+        now.addAndGet(TimeUnit.SECONDS.toNanos(UnattendedLocalTestMode.MAX_DURATION_SECONDS.toLong() + 1))
+        val result = mode.decideAndCommit(authorizedContext) { committed = true; "committed" }
+        assertEquals(LocalTestPolicyDecision.REQUIRE_MANUAL_APPROVAL, result.policy.decision)
+        assertNull(result.value)
+        assertFalse(committed)
+    }
+
+    @Test
     fun `each activation receives fresh run and server identities`() {
         var generation = 0
         val freshMode = UnattendedLocalTestMode(

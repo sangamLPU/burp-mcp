@@ -22,7 +22,7 @@ enum class LocalTestOperation {
     PROPOSE_EDIT
 }
 
-enum class LocalTestManagementOperation { START_SESSION, STOP_SESSION, CONFIGURE_LOCAL_SCOPE }
+enum class LocalTestManagementOperation { START_SESSION, STOP_SESSION, CONFIGURE_LOCAL_SCOPE, CONFIGURE_RULE, ENABLE_RULE }
 
 data class LocalTestPolicyContext(
     val operation: LocalTestOperation?,
@@ -66,6 +66,7 @@ data class LocalTestManagementContext(
 )
 
 data class LocalTestPolicyResult(val decision: LocalTestPolicyDecision, val reason: String)
+data class LocalTestPolicyCommit<T>(val policy: LocalTestPolicyResult, val value: T?)
 
 @Serializable
 data class UnattendedLocalTestSnapshot(
@@ -232,6 +233,14 @@ class UnattendedLocalTestMode(
         return audit(context, LocalTestPolicyDecision.AUTO_APPROVE, "all synthetic-local policy checks passed")
     }
 
+    /** Atomically evaluates and commits one short local queue mutation before the authorization lease can expire. */
+    @Synchronized
+    fun <T> decideAndCommit(context: LocalTestPolicyContext, action: () -> T): LocalTestPolicyCommit<T> {
+        val decision = decide(context)
+        if (decision.decision != LocalTestPolicyDecision.AUTO_APPROVE) return LocalTestPolicyCommit(decision, null)
+        return LocalTestPolicyCommit(decision, action())
+    }
+
     @Synchronized
     fun decideManagement(context: LocalTestManagementContext): LocalTestPolicyResult {
         expireIfDueLocked()
@@ -248,6 +257,20 @@ class UnattendedLocalTestMode(
             LocalTestManagementOperation.CONFIGURE_LOCAL_SCOPE -> if (context.sessionActive) {
                 "scope setup requires an inactive interception session"
             } else null
+            LocalTestManagementOperation.CONFIGURE_RULE -> when {
+                context.sessionActive -> "rule configuration requires an inactive interception session"
+                !context.exactLocalAllowlistOnly -> "the MCP allowlist is not restricted to the local test target"
+                !context.allLocalTestUrlsEligible -> "the nine predefined localhost URLs are not all eligible"
+                else -> null
+            }
+            LocalTestManagementOperation.ENABLE_RULE -> when {
+                !context.sessionActive -> "an approved interception session is required to enable a rule"
+                !context.sessionBoundToMode -> "the active interception session is not bound to this local authorization"
+                !context.exactLocalAllowlistOnly -> "the MCP allowlist is not restricted to the local test target"
+                !context.allLocalTestUrlsEligible -> "the nine predefined localhost URLs are not all eligible"
+                !context.requestedSessionLifetimeFitsMode -> "rule duration exceeds remaining local authorization"
+                else -> null
+            }
             LocalTestManagementOperation.START_SESSION -> when {
                 context.sessionActive -> "an interception session is already active"
                 !context.exactLocalAllowlistOnly -> "the MCP allowlist is not restricted to the local test target"

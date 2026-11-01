@@ -64,6 +64,7 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
     }
 
     val queue = DecisionQueue<HeldMessage>()
+    internal val ruleEngine = InterceptionRuleEngine()
     @Volatile var enabled = false; private set
     @Volatile var allowEdits = false
     @Volatile var timeoutSeconds = config.interceptionTimeoutSeconds; private set
@@ -124,6 +125,7 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
             runCatching {
                 synchronized(this) { expireUnattendedModeLocked() }
                 queue.expire()
+                ruleEngine.tick()
                 heartbeatTick()
             }.onFailure { ActivityLog.record("intercept_expiry", "error", it.javaClass.simpleName) }
         }, 1, 1, TimeUnit.SECONDS)
@@ -249,6 +251,7 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         reviewJobs.clear()
         disclosureJobs.values.toList().forEach { it.cancel(CancellationException("Interception session ended: $reason")) }
         disclosureJobs.clear()
+        ruleEngine.pauseAll(if (reason == "UNATTENDED_EXPIRED") "AUTHORIZATION_EXPIRED" else reason)
         if (wasActive) ActivityLog.record("intercept_session", "ended", reason)
     }
     fun authorized(request: HttpRequest) = runCatching { isAuthorizedRequest(request, api, config) }.getOrDefault(false)
@@ -294,6 +297,9 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         if (ticket == null) { ActivityLog.record("intercept_capture", "dropped", "queue capacity reached"); return null }
         val metadata = requestMetadata(value.request)
         ActivityLog.record("intercept_$kind", "captured", "id=${ticket.id} ${metadata.method} ${metadata.hostname}${metadata.urlPath}")
+        runCatching { processMatchingRule(ticket) }.onFailure {
+            ActivityLog.record("intercept_rule", "failed", it.javaClass.simpleName)
+        }
         val result = queue.await(ticket) ?: return null
         // Scope and allowlist can change while the callback is waiting.
         if (!enabled || closed || !authorized(result.request) || (result.message !== value.message && (config.readOnlyMode || !allowEdits))) {
@@ -301,6 +307,167 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         }
         return result
     }
+
+    private data class AutoRuleRelease(val message: HeldMessage?, val dropped: Boolean)
+
+    private fun processMatchingRule(ticket: DecisionQueue.Ticket<HeldMessage>) {
+        val input = toRuleHttpMessage(ticket.kind, ticket.original, ticket.id) ?: return
+        val evaluation = ruleEngine.evaluate(input) ?: return
+        if (evaluation.status != RuleEvaluationStatus.READY) {
+            ruleEngine.finish(evaluation, "SKIPPED", "MANUAL", evaluation.code ?: evaluation.status.name)
+            ActivityLog.record("intercept_rule", "manual_required", evaluation.code ?: evaluation.status.name)
+            return
+        }
+        synchronized(this) {
+            ruleEngine.commit(evaluation) {
+                expireUnattendedModeLocked()
+                if (!enabled || closed || !config.requireBearerToken) throw RuleAuthorizationRequired("SESSION_AUTHORIZATION_INACTIVE")
+                val authorization = unattendedMode.snapshot()
+                if (!authorization.active || !unattendedMode.isBoundToSession(currentSessionId)) {
+                    throw RuleAuthorizationRequired("LOCAL_AUTHORIZATION_INACTIVE")
+                }
+                if (config.readOnlyMode) throw RuleAuthorizationRequired("READ_ONLY_MODE")
+                val current = runCatching { queue.get(ticket.id) }.getOrElse { throw RuleAuthorizationRequired("MESSAGE_NO_LONGER_PENDING") }
+                if (current.kind != ticket.kind || current.revision != ticket.revision || current.proposed != null) {
+                    throw RuleAuthorizationRequired("MESSAGE_REVISION_CHANGED")
+                }
+                if (hasSensitiveContent(current.original.request, current.original.message)) {
+                    throw RuleAuthorizationRequired("SENSITIVE_CONTENT_REQUIRES_MANUAL_REVIEW")
+                }
+                if (evaluation.action == RuleAction.DROP) {
+                    if (ticket.kind != "request") throw RuleAuthorizationRequired("RESPONSE_DROP_REQUIRES_LOCAL_REVIEW")
+                    val decision = unattendedMode.decideAndCommit(policyContext(current, LocalTestOperation.DROP_REQUEST)) {
+                        queue.drop(ticket.id)
+                    }
+                    if (decision.policy.decision != LocalTestPolicyDecision.AUTO_APPROVE) throw RuleAuthorizationRequired("DROP_NOT_AUTHORIZED")
+                    AutoRuleRelease(null, dropped = true)
+                } else {
+                    var releaseTicket = current
+                    if (evaluation.changed) {
+                        if (!allowEdits) throw RuleAuthorizationRequired("LIVE_EDITS_DISABLED")
+                        val edited = applyRuleOutput(current.original, evaluation.output)
+                        if (hasSensitiveContent(if (edited.message is HttpRequest) edited.message else edited.request, edited.message)) {
+                            throw RuleAuthorizationRequired("SENSITIVE_OUTPUT_REQUIRES_MANUAL_REVIEW")
+                        }
+                        val proposed = current.copy(
+                            proposed = edited,
+                            revision = current.revision + 1,
+                            approvedRevision = null,
+                            approvedBy = null
+                        )
+                        val proposalCommit = unattendedMode.decideAndCommit(policyContext(proposed, LocalTestOperation.PROPOSE_EDIT)) {
+                            queue.propose(ticket.id, current.revision, edited)
+                        }
+                        if (proposalCommit.policy.decision != LocalTestPolicyDecision.AUTO_APPROVE) {
+                            throw RuleAuthorizationRequired("MODIFICATION_NOT_AUTHORIZED")
+                        }
+                        val newRevision = proposalCommit.value ?: throw RuleAuthorizationRequired("PROPOSAL_NOT_COMMITTED")
+                        releaseTicket = runCatching { queue.get(ticket.id) }.getOrElse { throw RuleAuthorizationRequired("MESSAGE_EXPIRED_AFTER_EDIT") }
+                        check(newRevision == releaseTicket.revision)
+                    }
+                    val approval = unattendedMode.decideAndCommit(policyContext(releaseTicket, LocalTestOperation.APPROVE_REVISION)) {
+                        queue.approve(ticket.id, releaseTicket.revision, UnattendedLocalTestMode.AUTO_APPROVAL_SOURCE)
+                    }
+                    if (approval.policy.decision != LocalTestPolicyDecision.AUTO_APPROVE) throw RuleAuthorizationRequired("FORWARD_NOT_AUTHORIZED")
+                    releaseTicket = runCatching { queue.get(ticket.id) }.getOrElse { throw RuleAuthorizationRequired("MESSAGE_EXPIRED_BEFORE_FORWARD") }
+                    val operation = if (ticket.kind == "request") LocalTestOperation.FORWARD_REQUEST else LocalTestOperation.FORWARD_RESPONSE
+                    val forwarding = unattendedMode.decideAndCommit(policyContext(releaseTicket, operation)) {
+                        if (!RequestRateLimiter.tryAcquire()) {
+                            queue.revokeApprovals(UnattendedLocalTestMode.AUTO_APPROVAL_SOURCE)
+                            throw RuleAuthorizationRequired("REQUEST_RATE_LIMIT")
+                        }
+                        try { queue.forward(ticket.id, releaseTicket.revision) }
+                        catch (error: Exception) {
+                            queue.revokeApprovals(UnattendedLocalTestMode.AUTO_APPROVAL_SOURCE)
+                            throw error
+                        }
+                    }
+                    if (forwarding.policy.decision != LocalTestPolicyDecision.AUTO_APPROVE) {
+                        queue.revokeApprovals(UnattendedLocalTestMode.AUTO_APPROVAL_SOURCE)
+                        throw RuleAuthorizationRequired("FORWARD_AUTHORIZATION_EXPIRED")
+                    }
+                    AutoRuleRelease(releaseTicket.proposed ?: releaseTicket.original, dropped = false)
+                }
+            }
+        }
+    }
+
+    private fun toRuleHttpMessage(kind: String, held: HeldMessage, messageId: String): RuleHttpMessage? = runCatching {
+        val uri = URI(held.request.url())
+        val path = uri.rawPath.ifBlank { "/" }
+        val target = "${uri.scheme}://${uri.host}:${uri.port}$path"
+        val message = held.message
+        RuleHttpMessage(
+            direction = if (kind == "request") RuleDirection.REQUEST else RuleDirection.RESPONSE,
+            targetUrl = target,
+            url = held.request.url(),
+            method = held.request.method(),
+            headers = message.headers().map { RuleHeader(it.name(), it.value()) },
+            body = message.body().getBytes(),
+            statusCode = (message as? HttpResponse)?.statusCode()?.toInt(),
+            messageId = messageId
+        )
+    }.getOrNull()
+
+    private fun applyRuleOutput(original: HeldMessage, output: RuleHttpMessage): HeldMessage {
+        val before = original.message.headers().map { RuleHeader(it.name(), it.value()) }
+        val changedNames = (before.map { it.name } + output.headers.map { it.name }).distinctBy { it.lowercase() }
+            .filter { name -> before.filter { it.name.equals(name, true) }.map { it.value } != output.headers.filter { it.name.equals(name, true) }.map { it.value } }
+        var request = original.request
+        var message: HttpMessage = original.message
+        if (message is HttpRequest) {
+            val uri = URI(output.url)
+            val pathAndQuery = uri.rawPath.ifBlank { "/" } + (uri.rawQuery?.let { "?$it" } ?: "")
+            if (message.url() != output.url) message = message.withPath(pathAndQuery)
+            var edited: HttpRequest = message
+            if (!message.body().getBytes().contentEquals(output.body)) {
+                val text = decodeRuleUtf8(output.body)
+                edited = edited.withBody(text)
+            }
+            changedNames.forEach { name ->
+                val values = output.headers.filter { it.name.equals(name, true) }.map { it.value }
+                edited = edited.withRemovedHeader(name)
+                values.forEach { value -> edited = edited.withAddedHeader(name, value) }
+            }
+            require(edited.httpService().host() == original.request.httpService().host() &&
+                edited.httpService().port() == original.request.httpService().port() &&
+                edited.httpService().secure() == original.request.httpService().secure()) { "Rule output changed the actual destination" }
+            check(authorized(edited)) { "Rule output is no longer in Burp scope and the MCP allowlist" }
+            check(edited.toByteArray().length() <= SafeContent.MAX_REQUEST_BYTES) { "Rule output exceeds the bounded message size" }
+            validateMaterializedFraming(edited)
+            request = edited
+            message = edited
+        } else if (message is HttpResponse) {
+            var edited: HttpResponse = message
+            if (!message.body().getBytes().contentEquals(output.body)) edited = edited.withBody(decodeRuleUtf8(output.body))
+            changedNames.forEach { name ->
+                val values = output.headers.filter { it.name.equals(name, true) }.map { it.value }
+                edited = edited.withRemovedHeader(name)
+                values.forEach { value -> edited = edited.withAddedHeader(name, value) }
+            }
+            check(edited.toByteArray().length() <= SafeContent.MAX_REQUEST_BYTES) { "Rule output exceeds the bounded message size" }
+            validateMaterializedFraming(edited)
+            message = edited
+        }
+        return HeldMessage(message, request)
+    }
+
+    private fun validateMaterializedFraming(message: HttpMessage) {
+        val lengths = message.headers().filter { it.name().equals("Content-Length", true) }
+        check(lengths.size <= 1) { "Rule output has ambiguous Content-Length framing" }
+        if (lengths.isNotEmpty()) {
+            val declared = lengths.single().value().toLongOrNull()
+            check(declared != null && declared == message.body().getBytes().size.toLong()) { "Rule output Content-Length does not match its body" }
+        }
+        check(message.headers().none { it.name().equals("Transfer-Encoding", true) }) {
+            "Rule output with unsupported Transfer-Encoding must remain under manual review"
+        }
+    }
+
+    private fun decodeRuleUtf8(bytes: ByteArray): String = StandardCharsets.UTF_8.newDecoder()
+        .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+        .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+        .decode(java.nio.ByteBuffer.wrap(bytes)).toString()
 
     fun snapshot(id: String, kind: String): DecisionQueue.Ticket<HeldMessage> {
         if (!config.requireBearerToken) { cancel("AUTHENTICATION_DISABLED"); error("Live interception requires bearer authentication") }
@@ -325,6 +492,7 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
             "Unattended mode can only be activated with interception stopped and both queues empty"
         }
         unattendedMode.activate(seconds)
+        ruleEngine.freshHumanActivation()
         ActivityLog.record("unattended_local_test", "visible", "UI activation; duration=${seconds}s")
     }
 
@@ -332,6 +500,7 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
     fun deactivateUnattendedLocalTestMode(reason: String = "USER_DISABLED"): Boolean {
         val wasActive = unattendedMode.deactivate(reason)
         queue.revokeApprovals(UnattendedLocalTestMode.AUTO_APPROVAL_SOURCE)
+        if (wasActive) ruleEngine.pauseAll("AUTHORIZATION_DISABLED")
         return wasActive
     }
 
@@ -339,6 +508,7 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
     fun emergencyStopUnattendedLocalTestMode() {
         deactivateUnattendedLocalTestMode("EMERGENCY_STOP")
         endSession("UNATTENDED_EMERGENCY_STOP")
+        ruleEngine.emergencyStop()
     }
 
     @Synchronized
@@ -371,9 +541,84 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         )
     }
 
+    @Synchronized fun createInterceptionRule(spec: InterceptionRuleSpec): InterceptionRuleView {
+        checkRuleBearerAndMode(spec)
+        check(!enabled) { "Create or edit rules before starting the bounded interception session" }
+        require(queue.list("request").isEmpty() && queue.list("response").isEmpty()) { "Both interception queues must be empty" }
+        val decision = unattendedManagementDecision(LocalTestManagementOperation.CONFIGURE_RULE)
+        check(decision.decision == LocalTestPolicyDecision.AUTO_APPROVE) { "Rule configuration is not authorized: ${decision.reason}" }
+        return ruleEngine.create(spec)
+    }
+
+    @Synchronized fun updateInterceptionRule(id: String, spec: InterceptionRuleSpec): InterceptionRuleView {
+        checkRuleBearerAndMode(spec)
+        check(!enabled) { "Rule configuration is allowed only before the session starts" }
+        require(queue.list("request").isEmpty() && queue.list("response").isEmpty()) { "Both interception queues must be empty" }
+        check(ruleEngine.get(id).state != InterceptionRuleState.ACTIVE) { "Pause a rule before updating it" }
+        val decision = unattendedManagementDecision(LocalTestManagementOperation.CONFIGURE_RULE)
+        check(decision.decision == LocalTestPolicyDecision.AUTO_APPROVE) { "Rule configuration is not authorized: ${decision.reason}" }
+        return ruleEngine.update(id, spec)
+    }
+
+    @Synchronized fun enableInterceptionRule(id: String): InterceptionRuleView {
+        check(config.requireBearerToken && !config.readOnlyMode) { "Authenticated write access is required to enable a rule" }
+        expireUnattendedModeLocked()
+        val rule = ruleEngine.get(id)
+        val mode = unattendedMode.snapshot()
+        check(mode.active && mode.testRunId == rule.spec.authorizationReference) { "Rule authorization reference does not match the active test run" }
+        ruleEngine.validateForAuthorization(rule.spec)
+        check(enabled && heartbeatHealth == "HEALTHY") { "A healthy approved interception session is required" }
+        check(allowEdits || rule.spec.action != RuleAction.MODIFY_AND_FORWARD) { "Enable the existing local live-edit control before enabling a modification rule" }
+        val health = health()
+        check(health.pendingRequests == 0 && health.pendingResponses == 0) { "Both queues must be empty before enabling a rule" }
+        val durationMillis = minOf(rule.spec.durationSeconds * 1000L, mode.remainingMillis, health.sessionRemainingMillis)
+        check(durationMillis >= 1_000) { "Less than one second of session and authorization time remains" }
+        val requestedSeconds = (durationMillis / 1000L).toInt().coerceAtLeast(1)
+        val decision = unattendedManagementDecision(LocalTestManagementOperation.ENABLE_RULE, requestedSeconds)
+        check(decision.decision == LocalTestPolicyDecision.AUTO_APPROVE) { "Rule activation is not authorized: ${decision.reason}" }
+        return ruleEngine.enable(id, durationMillis)
+    }
+
+    fun disableInterceptionRule(id: String): InterceptionRuleView = ruleEngine.disable(id)
+    fun deleteInterceptionRule(id: String): Boolean = ruleEngine.delete(id)
+    fun clearInterceptionRules(): Int = ruleEngine.clear()
+    fun clearInterceptionRuleStats(id: String? = null) = ruleEngine.clearStats(id)
+    fun pauseAllInterceptionRules() = ruleEngine.pauseAll("USER_STOP")
+
+    @Synchronized internal fun previewInterceptionRule(spec: InterceptionRuleSpec, message: RuleHttpMessage): InterceptionRulePreviewResult {
+        check(config.requireBearerToken) { "Bearer authentication is required" }
+        val mode = unattendedMode.snapshot()
+        check(mode.active && mode.testRunId == spec.authorizationReference) { "Preview requires the current synthetic test-run identity" }
+        ruleEngine.validateForAuthorization(spec)
+        check(message.body.size <= UnattendedLocalTestMode.MAX_PAYLOAD_BYTES) { "Preview body exceeds the bounded local test size" }
+        if (ruleMessageContainsSensitiveData(message)) throw IllegalArgumentException("Preview refuses credential-like or sensitive content")
+        return ruleEngine.previewDetailed(spec, message)
+    }
+
+    private fun checkRuleBearerAndMode(spec: InterceptionRuleSpec) {
+        check(config.requireBearerToken && !config.readOnlyMode) { "Authenticated write access with read-only mode disabled is required" }
+        ruleEngine.validateForAuthorization(spec)
+        val mode = unattendedMode.snapshot()
+        check(mode.active && mode.testRunId == spec.authorizationReference) { "Rule must reference the currently active synthetic test run" }
+    }
+
+    private fun ruleMessageContainsSensitiveData(message: RuleHttpMessage): Boolean {
+        val sensitiveNames = Regex("(?i)(authorization|cookie|token|password|passwd|secret|session|credential|api[_-]?key)")
+        val sensitiveValues = Regex("(?i)(bearer\\s+[A-Za-z0-9._~+/-]{8,}|basic\\s+[A-Za-z0-9+/=]{8,}|[\\\"']?(?:authorization|password|passwd|access[_-]?token|refresh[_-]?token|session[_-]?id|secret|cookie|credential|api[_-]?key)[\\\"']?\\s*[:=])")
+        if (message.headers.any { sensitiveNames.containsMatchIn(it.name) || sensitiveValues.containsMatchIn(it.value) }) return true
+        if (message.headers.any { it.name.equals("Content-Encoding", true) && !it.value.equals("identity", true) }) return true
+        if (message.direction == RuleDirection.RESPONSE && (message.statusCode in 300..399 || message.headers.any { it.name.equals("Location", true) })) return true
+        val urlQuery = runCatching { URI(message.url).rawQuery.orEmpty() }.getOrElse { return true }
+        if (Regex("(?i)(^|[&;])(authorization|cookie|token|password|passwd|secret|session|credential|api[_-]?key)(=|&|;|$)")
+                .containsMatchIn(runCatching { java.net.URLDecoder.decode(urlQuery, StandardCharsets.UTF_8) }.getOrElse { return true })) return true
+        val body = runCatching { decodeRuleUtf8(message.body) }.getOrElse { return true }
+        return sensitiveValues.containsMatchIn(body) || Regex("(?i)\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\b").containsMatchIn(body)
+    }
+
     private fun expireUnattendedModeLocked() {
         if (unattendedMode.expireIfDue()) {
             queue.revokeApprovals(UnattendedLocalTestMode.AUTO_APPROVAL_SOURCE)
+            ruleEngine.pauseAll("AUTHORIZATION_EXPIRED")
         }
     }
 

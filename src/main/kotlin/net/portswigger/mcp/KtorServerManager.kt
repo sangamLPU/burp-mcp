@@ -19,6 +19,7 @@ import net.portswigger.mcp.tools.registerBurpApiTools
 import net.portswigger.mcp.tools.registerTools
 import net.portswigger.mcp.intercept.LiveInterception
 import net.portswigger.mcp.intercept.registerInterceptionTools
+import net.portswigger.mcp.intercept.registerInterceptionRuleTools
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.net.URI
@@ -57,7 +58,10 @@ class KtorServerManager(private val api: MontoyaApi, private val live: LiveInter
 
                 mcpServer.registerTools(api, config)
                 mcpServer.registerBurpApiTools(api, config, live)
-                live?.let { mcpServer.registerInterceptionTools(it, api) }
+                live?.let {
+                    mcpServer.registerInterceptionTools(it, api)
+                    mcpServer.registerInterceptionRuleTools(it)
+                }
 
                 server = embeddedServer(Netty, port = config.port, host = config.host) {
                     install(CORS) {

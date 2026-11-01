@@ -3,21 +3,22 @@
 **Date:** 2026-11-01
 **Repository:** D:\Projects\MCP
 **Branch/base:** main / 57cf38165bb2e3e1f26f3867b2d4a9c2f21beeb8 before this validation cycle
-**Running build:** 20261101.5-burp2024.1.1.1
+**Running build:** unconfirmed; last reported `20261101.5-burp2024.1.1.1` (candidate .12 is not loaded)
 **Burp:** Professional 2024.1.1.1-26891
-**Extension version:** 1.3.2
+**Loaded extension version:** unconfirmed; last reported `1.3.2` (candidate version is `1.4.0`)
+**Current candidate:** `20261101.12-burp2024.1.1.1`
 **Montoya compile baseline:** 2023.12.1
 **Primary artifact:** build/libs/burp-mcp-all.jar
 
 ## Executive summary
 
-The loaded extension is responsive and authenticated MCP calls succeeded. The runtime reports build .5, version 1.3.2, Burp Professional, bearer authentication required, and a running listener at http://127.0.0.1:9876/mcp. The current connector catalog contains **71 tools**. Seven read-only runtime tools were invoked successfully during this verification; the remaining entries have registration and input-signature evidence only.
+The runtime paragraphs and matrix below preserve the earlier .5 verification snapshot; they are not current verification of candidate .12. During the .12 work, read-only MCP connection/status probes did not return within the bounded 52-second observation window and were not retried. The current loaded build, authentication responsiveness, and live tool catalog are therefore **unconfirmed**.
 
-The nine fixed http://127.0.0.1:8000 paths all report inBurpScope=true, hostAllowlisted=true, and eligible=true. The current live state is safe for continued offline work: interception is disabled, the session and heartbeat are expired, unattended mode is inactive, and both pending queues are empty.
+Candidate .12 compiled and packaged for Burp 2024.1.1.1 / Montoya 2023.12.1. The complete JUnit suite passed **214/214**, and the OFFLINE coordinator reported **18 PASS, 0 FAIL, 3 BLOCKED, 2 UNVERIFIED**. These tests include rule-engine state and transformation checks, MCP schema/control integration, and mocked request/response callback behavior; they do not establish real Proxy delivery. No live rule was enabled and no live traffic was sent by this work.
 
-The latest LOCAL run completed **21 PASS, 0 FAIL, 0 BLOCKED, 0 INCONCLUSIVE, 2 UNVERIFIED, 0 UNSUPPORTED**. The wrapper correctly classifies its aggregate as **INCONCLUSIVE** because approval-gated live behavior and candidate JAR creation remain unverified. Its Gradle task was up-to-date in that coordinator run; a subsequent forced execution ran **182 JUnit tests, 0 failures/errors/skips**. No live cancellation request was sent. **Phase 4A remains INCONCLUSIVE** pending active human-enabled authorization and actual Burp drop evidence.
+The Burp `.5` artifact remains preserved as the rollback. Candidate .12 has not been loaded. **Phase 4A remains INCONCLUSIVE** until a real request crosses Burp Proxy and drop, origin non-delivery, client outcome, stale-ID, approval-source, and queue-cleanup evidence is recorded.
 
-The packaged JAR was not rebuilt or replaced. Its SHA-256 remained 75186ec81d6f9d16c19802368677d4b33d1294d62e020cf338ccc3da5103b1d4. The coordinator now excludes shadowJar by default; candidate packaging requires an explicit -BuildCandidate.
+Candidate .12 SHA-256 is `97cce49be2b52263006090f95b418bf0eb4c727e45d772dd796bfe99cc876e66`; full artifact and rollback details appear in the .12 addendum. The full-validation coordinator excludes `shadowJar` by default; candidate packaging requires explicit opt-in.
 
 Machine-readable results:
 - [Latest LOCAL coordinator report](../build/reports/full-validation/validation-f3caf344080f419789e343edcb8d8bb6.json)
@@ -27,7 +28,9 @@ Machine-readable results:
 - [71-tool catalog and input signatures](../build/reports/tool-catalog-audit.json)
 - [Mission summary JSON](../build/reports/burp-mcp-validation-summary.json)
 
-## Current runtime evidence
+## Prior runtime evidence for build .5 (not re-confirmed for .12)
+
+The following table is retained as a dated prior snapshot. Its PASS entries do not establish current runtime state or candidate .12 behavior.
 
 | Check | Result | Evidence |
 |---|---|---|
@@ -47,7 +50,7 @@ Machine-readable results:
 
 The seven live-verification tool calls were burp_check_connection, burp_get_status, burp_get_capabilities, burp_get_intercept_status, burp_list_pending_requests, burp_list_pending_responses, and burp_get_scope.
 
-## Test results
+## Earlier validation results before candidate .12
 
 ### Full LOCAL validation
 
@@ -87,9 +90,9 @@ Coordinator run ID: f3caf344080f419789e343edcb8d8bb6.
 
 Detailed root causes and fixes are in [BURP_MCP_BUG_FIX_LOG.md](BURP_MCP_BUG_FIX_LOG.md).
 
-## Phase status and coverage matrix
+## Prior phase status and coverage matrix
 
-Statuses below distinguish direct current evidence from historical results and offline/mock coverage. Historical live results were not rerun in this mission.
+This matrix describes the earlier .5 baseline and must not be read as candidate .12 live evidence. Historical live results were not rerun for this candidate.
 
 | Area | Level | Status | Evidence / limitation |
 |---|---|---|---|
@@ -137,13 +140,13 @@ Statuses below distinguish direct current evidence from historical results and o
 | MCP responsiveness/freeze | Live + mock | INCONCLUSIVE | Current server responsive; local concurrency tests passed; historical service-wide freeze has no confirmed root cause or fix. |
 | Repeated-session/soak testing | None | UNVERIFIED | No soak test was run in this turn. |
 
-## Protocol and compatibility notes
+## Prior protocol and compatibility notes
 
 The capability endpoint reports Montoya baseline 2023.12.1, HTTP/1 and HTTP/2 request operations, Professional scanner findings, passive audit, Repeater send, and Collaborator support. It reports no Repeater tab enumeration and disables active audit because legacy checks can be intrusive.
 
 Build metadata says 1.3.2 / 20261101.5-burp2024.1.1.1; the JAR was built with JDK 18 and the project targets Java 17 bytecode. The exact loaded Burp version is confirmed. The packaged artifact was not modified during validation. HTTPS/TLS, HTTP/2 interception, compression, streaming, and long-lived protocols remain unverified or unsupported as marked above.
 
-## Artifact, backup, and repository state
+## Artifact, backup, and repository state at the earlier .5 snapshot
 
 - Existing JAR SHA-256: 75186ec81d6f9d16c19802368677d4b33d1294d62e020cf338ccc3da5103b1d4.
 - Existing preserved artifacts include the versioned .1 through .4 JARs and hash-named backups. The current .5 JAR remains in place.
@@ -157,3 +160,68 @@ Build metadata says 1.3.2 / 20261101.5-burp2024.1.1.1; the JAR was built with JD
 2. After the mode is active, run or authorize the coordinator command `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/run-supervised-reliability-suite.ps1 -Mode SUPERVISED`. It handles identity, fixture, session, one-shot traffic, policy drop, and verification. If Burp presents a confirmation that requires a physically present human, that confirmation must be handled locally.
 3. The latest SUPERVISED attempt authenticated and stopped before fixture/session startup because unattended mode was inactive. It sent no request. Phase 4A stays INCONCLUSIVE until every live evidence item passes.
 4. Continue live 4B/4C/4D only while the current explicit authorization remains valid and their individual preconditions pass; otherwise retain their offline results and mark live behavior UNVERIFIED.
+
+## 2026-11-01 addendum: interception rule engine candidate .9
+
+This addendum supersedes the earlier artifact statement for this feature work only. The prior .5 runner-validation cycle did not rebuild a JAR; the rule-engine implementation changes Kotlin extension source and therefore required a new candidate.
+
+| Item | Result | Evidence |
+|---|---|---|
+| Source candidate | `1.4.0`, build `20261101.9-burp2024.1.1.1` | `gradle.properties` and `BuildInfo.kt` compile as the same identity. |
+| Candidate JAR | `build/libs/burp-mcp-20261101.9-burp2024.1.1.1.jar` and `build/libs/burp-mcp-all.jar` | Manifest reports version 1.4.0 and build .9. SHA-256: `c752771a373933f864ab0c8587ac864d753b27f374a8d678ebf5413052a59695`. |
+| Superseded candidate .8 | `build/libs/burp-mcp-20261101.8-burp2024.1.1.1.jar` | Preserved before fail-closed matching and JSON-literal validation fixes; SHA-256: `e29c6b8a4b773afa6b95ddbd33be602660651b7e2f8a18f02934ded83d2a94b3`. |
+| Superseded candidate .7 | `build/libs/burp-mcp-20261101.7-burp2024.1.1.1.jar` | Preserved after reservation and JSON depth hardening; SHA-256: `30956e9d8b4eb4d452e268ed548fa9db34bf304590117a99e127586fd5f92e83`. |
+| Superseded candidate .6 | `build/libs/burp-mcp-20261101.6-burp2024.1.1.1.jar` | Preserved after the post-package Content-Length fix; SHA-256: `9e54c5e4f52dd4d402f07b934d9aa2e1829794f7b4b22d9117b93862e7f6d2d5`. |
+| Known-good .5 | `build/backups/burp-mcp-20261101.5-known-good.jar` | SHA-256 remains `75186ec81d6f9d16c19802368677d4b33d1294d62e020cf338ccc3da5103b1d4`, identical to the original .5 artifact. |
+| Burp/Montoya compatibility | Compile PASS | Compiled against Montoya API 2023.12.1; no Burp upgrade. |
+| Java compatibility | PASS | Candidate class-file major version is 61 (Java 17); Gradle source/target and Kotlin JVM target are 17. |
+| MCP catalog | PASS in embedded integration server | 86 Professional tools: existing 71 plus 15 rule-engine controls. The test checks the expected set and nested schemas. This is not a live loaded-Burp catalog check. |
+| Full JUnit suite | PASS | 210 tests, 0 failures, 0 errors, 0 skipped after packaging .9. |
+| Offline validation coordinator | PASS with explicit non-live outcomes | 18 PASS, 0 FAIL, 3 BLOCKED (local network tests are intentionally omitted in OFFLINE mode), 2 UNVERIFIED (approval-gated Burp work and coordinator candidate-copy step). See `../build/reports/full-validation/validation-961e2c979d934534998c3b15f7e14777.json`. The `.9` JAR was separately packaged and hash-verified. |
+| Rule evaluator | UNIT PASS | Typed/nested JSON, query/form, headers, literal text, matching, priority/conflicts, TTL/match caps, counters, malformed/duplicate/deep JSON, framing, limits, safe path matching, one-shot reservations, fail-closed co-matches, and 1/2/4/8 concurrent evaluations. |
+| Request/response callbacks | MOCK PASS | Mocked Montoya callbacks exercised request modification, associated response modification, authorization gates, manual fallback, and queue release. They did not pass through the running Burp Proxy. |
+| MCP control workflow | Embedded MCP integration PASS | Authenticated create/list/enable/stats/disable/delete calls ran in the test server with mocked Burp API/scope. No live authorization was activated. |
+| Live Proxy | UNVERIFIED | No traffic crossed the running Burp Proxy and no live approval was made. The available connected MCP tool registry still exposes 71 existing names and no rule-engine tools. Read-only connection/status probes did not return during a 52-second observation window; the currently loaded runtime build could not be re-confirmed. Candidate .9 has not been loaded. |
+
+The engine runs in the existing `LiveInterception` request/response pipeline and reuses its message IDs, revisions, approval queue, scope checks, allowlist, rate limiter, session, and unattended authorization. Rules are memory-only, disabled on creation, and bounded by active authorization/session expiry, a 300-second maximum TTL, 32 matches, 64 KiB messages, 64 configured rules, eight outstanding evaluator reservations, and the existing two-message auto-approval limit. A rule-condition parse failure blocks co-matched automatic changes for that message; ambiguous content types and JSON deeper than 64 levels stay manual. Automatic `DROP` is limited to request-direction rules because the current policy does not authorize automatic response drops. Only the fixed nine localhost paths are eligible.
+
+New MCP controls: `burp_create_interception_rule`, `burp_list_interception_rules`, `burp_get_interception_rule`, `burp_update_interception_rule`, `burp_enable_interception_rule`, `burp_disable_interception_rule`, `burp_delete_interception_rule`, `burp_clear_interception_rules`, `burp_preview_interception_rule`, `burp_get_interception_rule_stats`, `burp_get_interception_rule_events`, `burp_get_rule_engine_status`, `burp_clear_interception_rule_stats`, `burp_pause_all_interception_rules`, and `burp_emergency_stop_rules`.
+
+The historical MCP freeze remains undiagnosed. This feature's callback tests passed, but did not reproduce that freeze. The stalled read-only status probes are a current responsiveness symptom, but do not identify whether the cause is the extension, client transport, or another runtime layer. Candidate .9 is ready for supervised live validation after installation; it is not live-verified or release-proven. No GitHub push was performed.
+
+Guides: [Interception rule engine](INTERCEPTION_RULE_ENGINE.md) and [AI agent examples](AI_AGENT_INTERCEPTION_EXAMPLES.md). Machine-readable results: `../build/reports/interception-rule-engine-validation.json` and `.md`.
+
+## 2026-11-01 addendum: interception rule engine candidate .11
+
+This addendum supersedes the .9 artifact and test summary above. Candidate .10 is retained as a superseded intermediate; .5 remains the known-good rollback artifact.
+
+| Item | Result | Evidence |
+|---|---|---|
+| Source candidate | `1.4.0`, build `20261101.11-burp2024.1.1.1` | `gradle.properties` and `BuildInfo.kt` match. |
+| Candidate JAR | `build/libs/burp-mcp-20261101.11-burp2024.1.1.1.jar` and `build/libs/burp-mcp-all.jar` | Manifest reports version 1.4.0 and build .11. SHA-256: `572d3a3005b459a24ecf249eef5647982061f3861a18f4b117689ebd5fa7fe49`. Versioned copy and primary artifact hashes match. |
+| Java/Burp compatibility | PASS at compile/bytecode level | Montoya API 2023.12.1 compile; Java 17 bytecode major 61; 11,354 class files. No Burp upgrade. |
+| Full JUnit suite | PASS | 213 tests, 0 failures, 0 errors, 0 skipped, `validation.mode=all`. This includes rule engine, MCP integration schema/status, and mocked request/response callback tests. |
+| Modification cap | UNIT/MOCK PASS | Independent per-rule match and actual-modification limits; no-op forwards do not consume modification capacity; in-flight changes reserve budget atomically; engine status and stats expose the limits. |
+| MCP catalog | Embedded integration PASS / live UNVERIFIED | Embedded server schema and control tests expect 86 tools (existing 71 plus 15). The connected agent registry has not shown these new tools; the candidate is not loaded in Burp. |
+| Offline runner regressions | PASS | The bounded coordinator report `../build/reports/full-validation/validation-5ea15fb490be468e94e12a4e85ba0d00.json` recorded 18 PASS, 0 FAIL, 3 BLOCKED and 2 UNVERIFIED against .11 source. The three OFFLINE blocks are network-only cases; the two unverified entries remain approval-gated/live or candidate-copy checks. |
+| LIVE_PROXY | UNVERIFIED | No real Burp Proxy request/response, live rule execution, approval or origin/client effect was observed. Phase 4A remains INCONCLUSIVE. |
+| Runtime / MCP responsiveness | UNVERIFIED; freeze not diagnosed | A prior read-only MCP status probe stalled during a 52-second observation; it was stopped without retry. Candidate .11 has not been loaded. |
+
+Rule specs now expose `maximumModifications`; stats expose `remainingModifications`; rule-engine status exposes `maximumModificationsPerRule`. Concurrent modified messages reserve these slots before a release, and a no-op forward consumes only a match. The fixed localhost authorization boundary, human-visible activation, request-only automatic DROP, and existing two-message auto-approval limit are unchanged.
+
+Candidate .11 is a built, locally tested candidate, not a live-verified release. The connected Burp runtime still needs a human-controlled reload, followed by a supervised localhost test that records actual client, origin, drop, approval and queue evidence. No GitHub push was performed.
+
+## 2026-11-01 addendum: interception rule engine candidate .12
+
+Candidate .12 adds a security-boundary correction after reviewing clear-audit behavior. Rule consumption limits now use enforcement counters separate from clearable statistics, so `burp_clear_interception_rule_stats` cannot restore match or modification capacity. An in-flight modification reservation remains counted while audit fields are cleared.
+
+| Item | Result | Evidence |
+|---|---|---|
+| Candidate | `1.4.0`, build `20261101.12-burp2024.1.1.1` | `gradle.properties` and `BuildInfo.kt` match. |
+| Versioned and primary JARs | PASS | `build/libs/burp-mcp-20261101.12-burp2024.1.1.1.jar` and `build/libs/burp-mcp-all.jar`; SHA-256 `97cce49be2b52263006090f95b418bf0eb4c727e45d772dd796bfe99cc876e66`. Manifest verified. |
+| Full JUnit suite | PASS | 214 passed, 0 failed, 0 errors, 0 skipped. |
+| Focused engine suite | PASS | 27 passed, 0 failed, 0 errors, 0 skipped, including match/modification cap, concurrency reservations, no-op accounting, and counter clearing. |
+| OFFLINE coordinator | PASS with explicit non-live outcomes | 18 PASS, 0 FAIL, 3 BLOCKED, 2 UNVERIFIED. The blocked entries are local network tests excluded by OFFLINE mode. Report: `../build/reports/full-validation/validation-f4aeaf3e15a04dcdbdbaf81226e0bfd9.json`. |
+| Runtime and live Proxy | UNVERIFIED | Candidate .12 is not loaded in Burp. No live rule or proxy request was executed. The last read-only MCP probe stalled and the historical freeze remains undiagnosed. |
+
+Candidate .11 is preserved and `.5` remains the known-good rollback. Candidate .12 has not been loaded into Burp or exercised through `LIVE_PROXY`.
