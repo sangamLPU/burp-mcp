@@ -23,7 +23,7 @@ class InterceptionPanel(private val live: LiveInterception) : JPanel(BorderLayou
         UnattendedLocalTestMode.MAX_DURATION_SECONDS,
         30
     ))
-    private val unattendedStatus = JTextArea(7, 54).apply {
+    private val unattendedStatus = JTextArea(6, 54).apply {
         isEditable = false
         isFocusable = false
         lineWrap = true
@@ -35,6 +35,7 @@ class InterceptionPanel(private val live: LiveInterception) : JPanel(BorderLayou
     }
     private val unattendedButton = JButton("Enable Unattended Local Test Mode")
     private val unattendedEmergencyButton = JButton("Emergency stop unattended mode and interception")
+    private val identityControls = UnattendedIdentityControls(snapshotProvider = live::unattendedSnapshot)
     private val statusText = JTextArea(4, 54).apply {
         isEditable = false
         isFocusable = false
@@ -277,6 +278,9 @@ class InterceptionPanel(private val live: LiveInterception) : JPanel(BorderLayou
         c.gridy = 1
         add(unattendedStatus, c)
 
+        c.gridy = 2
+        add(identityControls, c)
+
         val durationRow = JPanel(GridBagLayout()).apply {
             isOpaque = false
             val d = GridBagConstraints().apply { anchor = GridBagConstraints.WEST; insets = Insets(0, 0, 0, Design.Spacing.SM) }
@@ -286,11 +290,11 @@ class InterceptionPanel(private val live: LiveInterception) : JPanel(BorderLayou
             unattendedDuration.toolTipText = "Defaults to ${UnattendedLocalTestMode.DEFAULT_DURATION_SECONDS}s; never exceeds ${UnattendedLocalTestMode.MAX_DURATION_SECONDS}s and never renews automatically."
             add(unattendedDuration, d)
         }
-        c.gridy = 2
-        add(durationRow, c)
         c.gridy = 3
-        add(unattendedButton, c)
+        add(durationRow, c)
         c.gridy = 4
+        add(unattendedButton, c)
+        c.gridy = 5
         add(unattendedEmergencyButton, c)
     }
 
@@ -353,6 +357,7 @@ class InterceptionPanel(private val live: LiveInterception) : JPanel(BorderLayou
 
         unattendedButton.text = if (unattended.active) "Disable Unattended Local Test Mode" else "Enable Unattended Local Test Mode"
         unattendedEmergencyButton.isEnabled = unattended.active || health.enabled
+        identityControls.update(unattended)
         unattendedStatus.text = buildString {
             if (unattended.active) {
                 append("ACTIVE — ${unattended.remainingMillis / 1000}s remain; expires automatically without renewal.")
@@ -360,8 +365,6 @@ class InterceptionPanel(private val live: LiveInterception) : JPanel(BorderLayou
                 append("\nExact paths: ${LocalTestTargets.paths.joinToString(", ")}")
                 append("\nMethods: GET, POST, PUT, PATCH, DELETE. Max 2 concurrent messages, 8 queued, 32 test cases per activation, 64 KiB payload.")
                 append("\nAutomatic gates: local test session start/stop, predefined scope helper, exact-revision synthetic request/response approval and forwarding, local request drop, and synthetic content disclosure.")
-                append("\nRun ID: ${unattended.testRunId}")
-                append("\nEphemeral server identity (send as X-MCP-Server-Identity): ${unattended.serverIdentity}")
             } else {
                 append("DISABLED. No approvals are automatic. Extension reload and expiry leave this mode off.")
                 append("\nDestination: http://${LocalTestTargets.HOST}:${LocalTestTargets.PORT}")
@@ -426,5 +429,8 @@ class InterceptionPanel(private val live: LiveInterception) : JPanel(BorderLayou
         .replace("\"", "&quot;")
         .replace("'", "&#39;")
 
-    fun cleanup() { timer.stop() }
+    fun cleanup() {
+        timer.stop()
+        identityControls.cleanup()
+    }
 }

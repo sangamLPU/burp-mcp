@@ -1,6 +1,7 @@
 package net.portswigger.mcp.intercept
 
 import net.portswigger.mcp.config.LocalTestTargets
+import net.portswigger.mcp.security.ActivityLog
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
@@ -16,7 +17,10 @@ class UnattendedLocalTestModeTest {
     )
 
     @AfterEach
-    fun cleanup() { mode.deactivate("TEST_CLEANUP") }
+    fun cleanup() {
+        mode.deactivate("TEST_CLEANUP")
+        ActivityLog.clear()
+    }
 
     private fun start() {
         mode.activate()
@@ -83,6 +87,58 @@ class UnattendedLocalTestModeTest {
     fun `mode is off by default and manual approval remains required`() {
         assertFalse(mode.snapshot().active)
         assertEquals(LocalTestPolicyDecision.REQUIRE_MANUAL_APPROVAL, mode.decide(context()).decision)
+    }
+
+    @Test
+    fun `each activation receives fresh run and server identities`() {
+        var generation = 0
+        val freshMode = UnattendedLocalTestMode(
+            nanoTime = now::get,
+            identityFactory = {
+                generation += 1
+                "11111111-2222-3333-4444-${generation.toString().padStart(12, '0')}" to
+                    (('A'.code + generation - 1).toChar().toString().repeat(43))
+            }
+        )
+        try {
+            freshMode.activate(60)
+            val first = freshMode.snapshot()
+            freshMode.deactivate("TEST_REACTIVATE")
+            freshMode.activate(60)
+            val second = freshMode.snapshot()
+
+            assertNotEquals(first.testRunId, second.testRunId)
+            assertNotEquals(first.serverIdentity, second.serverIdentity)
+        } finally {
+            freshMode.deactivate("TEST_CLEANUP")
+        }
+    }
+
+    @Test
+    fun `unattended activity log never records run or server identities`() {
+        ActivityLog.clear()
+        start()
+        val snapshot = mode.snapshot()
+        mode.decide(context())
+        mode.decideManagement(LocalTestManagementContext(
+            operation = LocalTestManagementOperation.START_SESSION,
+            bearerAuthenticationEnabled = true,
+            readOnlyMode = false,
+            queuesEmpty = true,
+            sessionActive = true,
+            sessionBoundToMode = true,
+            exactLocalAllowlistOnly = true,
+            allLocalTestUrlsEligible = true,
+            requestedSessionLifetimeFitsMode = true
+        ))
+        mode.deactivate("TEST_DISABLE")
+        mode.activate(60)
+        now.addAndGet(TimeUnit.SECONDS.toNanos(61))
+        mode.snapshot()
+
+        val details = ActivityLog.snapshot().joinToString("\n") { it.detail }
+        assertFalse(details.contains(snapshot.testRunId.orEmpty()))
+        assertFalse(details.contains(snapshot.serverIdentity.orEmpty()))
     }
 
     @Test

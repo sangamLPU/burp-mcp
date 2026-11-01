@@ -143,20 +143,19 @@ class UnattendedLocalTestMode(
         approvedOperationKeys.clear()
         testCaseIds.clear()
         requestMessageByTestCase.clear()
-        ActivityLog.record("unattended_local_test", "activated", "run=$runId duration=${durationSeconds}s")
+        ActivityLog.record("unattended_local_test", "activated", "duration=${durationSeconds}s")
     }
 
     @Synchronized
     fun deactivate(reason: String = "USER_DISABLED"): Boolean {
         expireIfDueLocked()
         if (activation == null) return false
-        val run = activation?.runId.orEmpty()
         activation = null
         boundSessionId = null
         approvedOperationKeys.clear()
         testCaseIds.clear()
         requestMessageByTestCase.clear()
-        ActivityLog.record("unattended_local_test", "disabled", "run=$run reason=$reason")
+        ActivityLog.record("unattended_local_test", "disabled", "reason=$reason")
         return true
     }
 
@@ -205,7 +204,7 @@ class UnattendedLocalTestMode(
             LocalTestPolicyDecision.REQUIRE_MANUAL_APPROVAL, "unattended mode is disabled or expired"
         )
         val reason = ineligibilityReason(current, context)
-        if (reason != null) return audit(context, LocalTestPolicyDecision.REQUIRE_MANUAL_APPROVAL, reason, current)
+        if (reason != null) return audit(context, LocalTestPolicyDecision.REQUIRE_MANUAL_APPROVAL, reason)
 
         val operation = context.operation!!
         val messageId = context.messageId!!
@@ -213,24 +212,24 @@ class UnattendedLocalTestMode(
         val testCaseId = context.testCaseId!!
         val key = "${operation.name}:$messageId:$revision"
         if (key in approvedOperationKeys) {
-            return audit(context, LocalTestPolicyDecision.DENY, "duplicate automatic decision", current)
+            return audit(context, LocalTestPolicyDecision.DENY, "duplicate automatic decision")
         }
         if (context.messageKind == "request") {
             val priorRequest = requestMessageByTestCase[testCaseId]
             if (priorRequest != null && priorRequest != messageId) {
-                return audit(context, LocalTestPolicyDecision.DENY, "duplicate test-case request identity", current)
+                return audit(context, LocalTestPolicyDecision.DENY, "duplicate test-case request identity")
             }
             requestMessageByTestCase[testCaseId] = messageId
         } else if (context.messageKind == "response" && testCaseId !in requestMessageByTestCase) {
-            return audit(context, LocalTestPolicyDecision.REQUIRE_MANUAL_APPROVAL, "response is not associated with an automatic test request", current)
+            return audit(context, LocalTestPolicyDecision.REQUIRE_MANUAL_APPROVAL, "response is not associated with an automatic test request")
         }
         if (testCaseId !in testCaseIds && testCaseIds.size >= MAX_REQUESTS_PER_RUN) {
-            return audit(context, LocalTestPolicyDecision.REQUIRE_MANUAL_APPROVAL, "per-run request limit reached", current)
+            return audit(context, LocalTestPolicyDecision.REQUIRE_MANUAL_APPROVAL, "per-run request limit reached")
         }
         approvedOperationKeys += key
         testCaseIds += testCaseId
         while (approvedOperationKeys.size > MAX_REQUESTS_PER_RUN * 4) approvedOperationKeys.remove(approvedOperationKeys.first())
-        return audit(context, LocalTestPolicyDecision.AUTO_APPROVE, "all synthetic-local policy checks passed", current)
+        return audit(context, LocalTestPolicyDecision.AUTO_APPROVE, "all synthetic-local policy checks passed")
     }
 
     @Synchronized
@@ -264,11 +263,11 @@ class UnattendedLocalTestMode(
         }
         if (reason != null) return ActivityLog.record(
             "unattended_local_test", "manual_required",
-            "run=${current.runId} operation=${context.operation.name} sessionActive=${context.sessionActive}; $reason"
+            "operation=${context.operation.name} sessionActive=${context.sessionActive}; $reason"
         ).let { LocalTestPolicyResult(LocalTestPolicyDecision.REQUIRE_MANUAL_APPROVAL, reason) }
         ActivityLog.record(
             "unattended_local_test", "auto_approved",
-            "run=${current.runId} operation=${context.operation.name} sessionActive=${context.sessionActive}; policy passed"
+            "operation=${context.operation.name} sessionActive=${context.sessionActive}; policy passed"
         )
         return LocalTestPolicyResult(LocalTestPolicyDecision.AUTO_APPROVE, "management policy passed")
     }
@@ -352,8 +351,7 @@ class UnattendedLocalTestMode(
     private fun audit(
         context: LocalTestPolicyContext,
         decision: LocalTestPolicyDecision,
-        reason: String,
-        current: Activation
+        reason: String
     ): LocalTestPolicyResult {
         val path = canonicalAllowedPath(context.url) ?: "[out-of-policy]"
         ActivityLog.record(
@@ -363,7 +361,7 @@ class UnattendedLocalTestMode(
                 LocalTestPolicyDecision.REQUIRE_MANUAL_APPROVAL -> "manual_required"
                 LocalTestPolicyDecision.DENY -> "denied"
             },
-            "operation=${context.operation?.name ?: "UNKNOWN"} path=$path run=${current.runId} " +
+            "operation=${context.operation?.name ?: "UNKNOWN"} path=$path " +
                 "message=${context.messageId ?: "missing"} revision=${context.revision ?: -1} " +
                 "sessionActive=${context.sessionActive}; $reason"
         )
@@ -378,7 +376,7 @@ class UnattendedLocalTestMode(
         approvedOperationKeys.clear()
         testCaseIds.clear()
         requestMessageByTestCase.clear()
-        ActivityLog.record("unattended_local_test", "expired", "run=${current.runId}; authorization expired")
+        ActivityLog.record("unattended_local_test", "expired", "authorization expired")
         return true
     }
 }

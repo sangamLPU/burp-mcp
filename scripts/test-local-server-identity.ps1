@@ -109,7 +109,11 @@ try {
     }
 
     $records = @(Get-Content -LiteralPath $logPath | ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop })
-    if ($records.Count -ne 1 -or $records[0].path -ne '/test-html' -or $records[0].testRunId -ne $runId) {
+    $identityFieldsPersisted = $false
+    if ($records.Count -eq 1) {
+        $identityFieldsPersisted = @($records[0].PSObject.Properties.Name | Where-Object { $_ -in @('testRunId', 'serverIdentity') }).Count -gt 0
+    }
+    if ($records.Count -ne 1 -or $records[0].path -ne '/test-html' -or $identityFieldsPersisted) {
         throw 'Health or rejected identity probes contaminated origin delivery evidence.'
     }
 
@@ -123,6 +127,7 @@ try {
         WrongServerIdentityRejected = ($probes[3].StatusCode -eq 403)
         ExactIdentityAccepted = ($probes[4].StatusCode -eq 200)
         OriginRecords = $records.Count
+        RunAndServerIdentitiesPersisted = $identityFieldsPersisted
         RejectedAndHealthRequestsLogged = $false
     } | Format-List
 } finally {

@@ -630,7 +630,6 @@ try {
             }
             $record = [ordered]@{
                 receivedAt = [DateTimeOffset]::Now.ToString('o')
-                testRunId = if ($TestRunId) { $TestRunId } else { $null }
                 method = $method
                 path = $loggedPath
                 contentLength = $contentLength

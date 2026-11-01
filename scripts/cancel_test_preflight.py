@@ -23,9 +23,20 @@ PROXY_PORT = 8080
 TARGET_URL = "http://127.0.0.1:8000/test-cancel"
 HEALTH_PATH = "/__phase4a-health"
 HEALTH_BODY = b"MCP_LOCAL_TEST_SERVER_READY"
-EXPECTED_BUILD_ID = "20261101.2-burp2024.1.1.1"
+EXPECTED_BUILD_ID = "20261101.5-burp2024.1.1.1"
 EXPECTED_BURP_VERSION_PREFIX = "Burp Suite Professional 2024.1.1.1"
-MIN_SESSION_REMAINING_MS = 240_000
+# The queue drops held messages at 120s and the client observes cancellation up
+# to 125s. Keep 25s beyond the client deadline for scheduling and cleanup.
+INTERCEPTED_MESSAGE_TIMEOUT_MS = 120_000
+CLIENT_OBSERVATION_DEADLINE_MS = 125_000
+POST_REQUEST_SAFETY_MARGIN_MS = 25_000
+MIN_REMAINING_MS = max(
+    INTERCEPTED_MESSAGE_TIMEOUT_MS, CLIENT_OBSERVATION_DEADLINE_MS
+) + POST_REQUEST_SAFETY_MARGIN_MS
+# Setup runs before a human starts a fresh interception session. Keep 30s for
+# that required Burp-local action in addition to the 150s test safety budget.
+SESSION_ACTIVATION_MARGIN_MS = 30_000
+MIN_SETUP_AUTHORIZATION_MS = MIN_REMAINING_MS + SESSION_ACTIVATION_MARGIN_MS
 PROTOCOL_VERSION = "2025-03-26"
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 MAX_MCP_RESPONSE_BYTES = 1_048_576
@@ -50,9 +61,8 @@ def bearer_token_from_environment(environ=None):
     return token
 
 
-def validate_mcp_snapshot(snapshot, minimum_remaining_ms=MIN_SESSION_REMAINING_MS,
-                          unattended_run_id=None, unattended_server_identity=None):
-    """Return safe, user-readable failed checks for an MCP status snapshot."""
+def _validate_snapshot_basics(snapshot):
+    """Check shared authenticated-server, target, and queue prerequisites."""
     failures = []
     connection = snapshot.get("connection")
     server = snapshot.get("server")
@@ -102,33 +112,6 @@ def validate_mcp_snapshot(snapshot, minimum_remaining_ms=MIN_SESSION_REMAINING_M
     if not isinstance(interception, dict):
         interception = {}
         failures.append("Live interception status is missing")
-    if interception.get("enabled") is not True:
-        failures.append("Live interception is not active")
-    if interception.get("heartbeatHealth") != "HEALTHY":
-        failures.append("Live interception heartbeat is not healthy")
-    if interception.get("sessionLifetimeSeconds") != 300:
-        failures.append("Live interception is not the requested 300-second session")
-    if interception.get("sessionEndReason") != "NONE":
-        failures.append("Live interception session has ended or is ending")
-    if unattended_run_id is not None or unattended_server_identity is not None:
-        mode = interception.get("unattendedMode") if isinstance(interception, dict) else None
-        if not isinstance(mode, dict) or mode.get("active") is not True:
-            failures.append("Unattended local test mode is not active for the supplied test identity")
-        elif mode.get("testRunId") != unattended_run_id or mode.get("serverIdentity") != unattended_server_identity:
-            failures.append("Supplied test identity does not match the active Burp-local authorization")
-
-    try:
-        remaining_ms = int(interception.get("sessionRemainingMillis", 0))
-    except (TypeError, ValueError):
-        remaining_ms = 0
-    if remaining_ms < minimum_remaining_ms:
-        failures.append("Less than four minutes remain in the approved session")
-    try:
-        lease_remaining_ms = int(interception.get("leaseRemainingMillis", 0))
-    except (TypeError, ValueError):
-        lease_remaining_ms = 0
-    if lease_remaining_ms <= 0:
-        failures.append("Live interception heartbeat lease has expired")
 
     try:
         pending_requests = int(interception.get("pendingRequests", -1))
@@ -144,6 +127,92 @@ def validate_mcp_snapshot(snapshot, minimum_remaining_ms=MIN_SESSION_REMAINING_M
     if not isinstance(responses, list) or responses:
         failures.append("Pending response listing is missing or non-empty")
 
+    return failures, interception
+
+
+def _validate_unattended_identity(interception, unattended_run_id, unattended_server_identity):
+    failures = []
+    mode = interception.get("unattendedMode")
+    if not isinstance(mode, dict) or mode.get("active") is not True:
+        failures.append("Unattended local test mode is not active")
+        return failures
+    active_run_id = mode.get("testRunId")
+    active_server_identity = mode.get("serverIdentity")
+    if not active_run_id or not active_server_identity:
+        failures.append("Both active unattended test identities are required")
+    if bool(unattended_run_id) != bool(unattended_server_identity):
+        failures.append("Both supplied unattended test identities are required")
+    elif unattended_run_id is not None and (
+        active_run_id != unattended_run_id or active_server_identity != unattended_server_identity
+    ):
+        failures.append("Supplied test identity does not match the active Burp-local authorization")
+    return failures
+
+
+def validate_setup_snapshot(snapshot, unattended_run_id=None, unattended_server_identity=None):
+    """Verify authentication and fixture prerequisites before starting interception."""
+    failures, interception = _validate_snapshot_basics(snapshot)
+    if interception.get("enabled") is not False:
+        failures.append("Live interception must be inactive during setup preflight")
+    failures.extend(_validate_unattended_identity(
+        interception, unattended_run_id, unattended_server_identity
+    ))
+    mode = interception.get("unattendedMode")
+    try:
+        authorization_remaining_ms = int(mode.get("remainingMillis", 0)) if isinstance(mode, dict) else 0
+    except (TypeError, ValueError):
+        authorization_remaining_ms = 0
+    if authorization_remaining_ms < MIN_SETUP_AUTHORIZATION_MS:
+        failures.append(
+            f"Unattended authorization has less than {MIN_SETUP_AUTHORIZATION_MS // 1000}s remaining "
+            "to activate interception and complete the test safely"
+        )
+    return failures
+
+
+def validate_mcp_snapshot(snapshot, minimum_remaining_ms=MIN_REMAINING_MS,
+                          unattended_run_id=None, unattended_server_identity=None):
+    """Return safe, user-readable failed checks for an active-session snapshot."""
+    failures, interception = _validate_snapshot_basics(snapshot)
+    if interception.get("enabled") is not True:
+        failures.append("Live interception is not active")
+    if interception.get("heartbeatHealth") != "HEALTHY":
+        failures.append("Live interception heartbeat is not healthy")
+    if interception.get("sessionLifetimeSeconds") != 300:
+        failures.append("Live interception is not the requested 300-second session")
+    if interception.get("sessionEndReason") != "NONE":
+        failures.append("Live interception session has ended or is ending")
+    if interception.get("timeoutSeconds") != INTERCEPTED_MESSAGE_TIMEOUT_MS // 1000:
+        failures.append("Interception message timeout is not the validated 120-second limit")
+    failures.extend(_validate_unattended_identity(
+        interception, unattended_run_id, unattended_server_identity
+    ))
+
+    try:
+        remaining_ms = int(interception.get("sessionRemainingMillis", 0))
+    except (TypeError, ValueError):
+        remaining_ms = 0
+    if remaining_ms < minimum_remaining_ms:
+        failures.append(
+            f"Live interception has less than {minimum_remaining_ms // 1000}s remaining "
+            "for the client deadline and safety margin"
+        )
+    mode = interception.get("unattendedMode")
+    try:
+        authorization_remaining_ms = int(mode.get("remainingMillis", 0)) if isinstance(mode, dict) else 0
+    except (TypeError, ValueError):
+        authorization_remaining_ms = 0
+    if authorization_remaining_ms < minimum_remaining_ms:
+        failures.append(
+            f"Unattended authorization has less than {minimum_remaining_ms // 1000}s remaining "
+            "for the client deadline and safety margin"
+        )
+    try:
+        lease_remaining_ms = int(interception.get("leaseRemainingMillis", 0))
+    except (TypeError, ValueError):
+        lease_remaining_ms = 0
+    if lease_remaining_ms <= 0:
+        failures.append("Live interception heartbeat lease has expired")
     return failures
 
 
@@ -358,8 +427,7 @@ def verify_authentication(client=None):
     return client
 
 
-def run_preflight():
-    client = verify_authentication()
+def unattended_identity_from_environment():
     expected_run_id = os.environ.get("BURP_TEST_RUN_ID")
     expected_server_identity = os.environ.get("BURP_TEST_SERVER_IDENTITY")
     if bool(expected_run_id) != bool(expected_server_identity):
@@ -368,14 +436,42 @@ def run_preflight():
         raise PreflightError("BURP_TEST_RUN_ID is malformed")
     if expected_server_identity is not None and not TOKEN_PATTERN.fullmatch(expected_server_identity):
         raise PreflightError("BURP_TEST_SERVER_IDENTITY is malformed")
+    return expected_run_id, expected_server_identity
 
-    # Initialize/notification are supported MCP setup calls. Use the client returned
-    # by verify_authentication so the exact token/session context is retained.
-    first_snapshot = read_mcp_snapshot(client)
-    failures = validate_mcp_snapshot(first_snapshot, unattended_run_id=expected_run_id,
-                                     unattended_server_identity=expected_server_identity)
+
+def run_setup_preflight():
+    """Check auth, identity, scope, proxy and fixture before live interception starts."""
+    client = initialize()
+    expected_run_id, expected_server_identity = unattended_identity_from_environment()
+    if expected_run_id is None:
+        raise PreflightError("Active unattended test identities are required for setup; request was not sent")
+
+    check_proxy_listener()
+    check_test_server_health(expected_run_id, expected_server_identity)
+
+    final_snapshot = read_mcp_snapshot(client)
+    failures = validate_setup_snapshot(
+        final_snapshot,
+        unattended_run_id=expected_run_id,
+        unattended_server_identity=expected_server_identity,
+    )
     if failures:
         raise PreflightError("; ".join(failures))
+    authorization_seconds = int(
+        final_snapshot["interception"]["unattendedMode"]["remainingMillis"]
+    ) // 1000
+    print(
+        "SETUP PREFLIGHT PASS: authenticated MCP, expected Burp build/version, Proxy listener, "
+        "test-server identity, scope/allowlist and empty queues verified; live interception is off; "
+        f"unattended authorization {authorization_seconds}s remain. /test-cancel was not sent."
+    )
+
+
+def run_preflight():
+    client = initialize()
+    expected_run_id, expected_server_identity = unattended_identity_from_environment()
+    if expected_run_id is None:
+        raise PreflightError("Active unattended test identities are required; request was not sent")
 
     check_proxy_listener()
     check_test_server_health(expected_run_id, expected_server_identity)
@@ -387,10 +483,14 @@ def run_preflight():
         raise PreflightError("; ".join(failures))
 
     remaining_seconds = int(final_snapshot["interception"]["sessionRemainingMillis"]) // 1000
+    authorization_seconds = int(
+        final_snapshot["interception"]["unattendedMode"]["remainingMillis"]
+    ) // 1000
     print(
         "PREFLIGHT PASS: authenticated MCP, expected Burp build/version, Proxy listener, "
         "test-server health, scope/allowlist, active healthy session, empty queues; "
-        f"{remaining_seconds}s remain. /test-cancel was not sent."
+        f"session {remaining_seconds}s and unattended authorization {authorization_seconds}s remain. "
+        "/test-cancel was not sent."
     )
 
 
@@ -400,6 +500,8 @@ def main(argv=None):
         if args == ["--auth-only"]:
             verify_authentication()
             print("AUTH PASS: authenticated MCP initialization and read-only status succeeded; token was not displayed.")
+        elif args == ["--setup-only"]:
+            run_setup_preflight()
         elif not args:
             run_preflight()
         else:

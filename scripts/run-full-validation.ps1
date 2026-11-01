@@ -1,6 +1,7 @@
 param(
     [ValidateSet('OFFLINE', 'LOCAL', 'SUPERVISED')]
     [string]$Mode = 'OFFLINE',
+    [switch]$BuildCandidate,
     [ValidateRange(60, 7200)]
     [int]$OverallTimeoutSeconds = 1800,
     [ValidateRange(30, 1800)]
@@ -108,6 +109,19 @@ function Get-Sha256([string]$Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Get-GradleValidationArguments {
+    param(
+        [Parameter(Mandatory = $true)] [ValidateSet('OFFLINE', 'LOCAL', 'SUPERVISED')] [string]$ValidationMode,
+        [Parameter(Mandatory = $true)] [ValidateSet(17, 18)] [int]$ToolchainVersion,
+        [switch]$BuildCandidate
+    )
+
+    $validationSetting = if ($ValidationMode -eq 'OFFLINE') { 'offline' } else { 'all' }
+    $arguments = "test --offline --no-daemon --console=plain -Pvalidation.mode=$validationSetting -Pjava.toolchain.version=$ToolchainVersion"
+    if (-not $BuildCandidate) { $arguments += ' -x shadowJar' }
+    return $arguments
+}
+
 try {
     # Preflight is intentionally read-only except for generated reports and bounded test logs under build/.
     $requiredPaths = @(
@@ -209,9 +223,10 @@ try {
         else { Add-Result 'Changed-file secret scan' 'FAIL' 'A bearer-token literal or private-key block was found; inspect locally without copying it into the report.' }
     }
 
-    # Preserve the artifact that is about to be overwritten before Gradle packages a new build.
+    # Existing artifacts are read-only by default. Packaging is an explicit opt-in because
+    # this project's test task depends on shadowJar and would otherwise replace the loaded JAR.
     $existingJar = Join-Path $repoRoot 'build\libs\burp-mcp-all.jar'
-    if (Test-Path -LiteralPath $existingJar -PathType Leaf) {
+    if ($BuildCandidate -and (Test-Path -LiteralPath $existingJar -PathType Leaf)) {
         $beforeHash = Get-Sha256 $existingJar
         $backupDir = Join-Path $repoRoot 'build\backups'
         $null = New-Item -ItemType Directory -Force -Path $backupDir
@@ -220,14 +235,16 @@ try {
         if ((Get-Sha256 $backupPath) -eq $beforeHash) {
             Add-Result 'Pre-build JAR backup' 'PASS' "Preserved SHA-256 $beforeHash at $backupPath."
         } else { Add-Result 'Pre-build JAR backup' 'FAIL' 'Backup SHA-256 did not match the existing JAR.' }
-    } else {
+    } elseif ($BuildCandidate) {
         Add-Result 'Pre-build JAR backup' 'UNVERIFIED' 'No existing packaged JAR was present to back up.'
+    } else {
+        Add-Result 'JAR overwrite policy' 'PASS' 'Candidate packaging was not requested; Gradle shadowJar is excluded and the existing artifact remains read-only.'
     }
 
     if ($null -ne $toolchainVersion) {
-        $validationSetting = if ($Mode -eq 'OFFLINE') { 'offline' } else { 'all' }
-        $gradleArgs = "test --offline --no-daemon --console=plain -Pvalidation.mode=$validationSetting -Pjava.toolchain.version=$toolchainVersion"
-        $gradleSucceeded = Invoke-BoundedCommand 'Gradle automated tests' @("call `"$repoRoot\gradlew.bat`" $gradleArgs") $PerTestTimeoutSeconds
+        $gradleArgs = Get-GradleValidationArguments -ValidationMode $Mode -ToolchainVersion $toolchainVersion -BuildCandidate:$BuildCandidate
+        $gradleLabel = if ($BuildCandidate) { 'Gradle tests and candidate packaging' } else { 'Gradle tests without JAR packaging' }
+        $gradleSucceeded = Invoke-BoundedCommand $gradleLabel @("call `"$repoRoot\gradlew.bat`" $gradleArgs") $PerTestTimeoutSeconds
     } else {
         Add-Result 'Gradle automated tests' 'BLOCKED' 'No supported Java 17 or 18 toolchain was available.'
         $gradleSucceeded = $false
@@ -257,6 +274,18 @@ try {
     $powershellAuthTest = Join-Path $repoRoot 'scripts\test-cancel-preflight-auth.ps1'
     $powershellAuthSucceeded = Invoke-BoundedCommand 'PowerShell child environment inheritance' @(
         "`"$powershellExe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$powershellAuthTest`""
+    ) 30
+    $runnerAuthTest = Join-Path $repoRoot 'scripts\test-cancel-runner-auth.ps1'
+    $runnerAuthSucceeded = Invoke-BoundedCommand 'PowerShell cancellation auth fallback and process handling offline regressions' @(
+        "`"$powershellExe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$runnerAuthTest`""
+    ) 60
+    $workflowOfflineTest = Join-Path $repoRoot 'scripts\test-cancel-workflow-offline.ps1'
+    $workflowOfflineSucceeded = Invoke-BoundedCommand 'Copied cancellation workflow offline orchestration regressions' @(
+        "`"$powershellExe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$workflowOfflineTest`""
+    ) 90
+    $orchestratorTest = Join-Path $repoRoot 'scripts\test-validation-orchestrator.ps1'
+    $orchestratorSucceeded = Invoke-BoundedCommand 'Validation orchestrator artifact-preservation regressions' @(
+        "`"$powershellExe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$orchestratorTest`""
     ) 30
 
     if ($Mode -in @('LOCAL', 'SUPERVISED')) {
@@ -292,7 +321,8 @@ try {
             $expectedVersion = (Select-String -LiteralPath (Join-Path $repoRoot 'gradle.properties') -Pattern '^version=(.+)$').Matches[0].Groups[1].Value
             $expectedBuild = (Select-String -LiteralPath (Join-Path $repoRoot 'gradle.properties') -Pattern '^build\.id=(.+)$').Matches[0].Groups[1].Value
             if ($manifest -match [regex]::Escape("Implementation-Version: $expectedVersion") -and $manifest -match [regex]::Escape("Build-Id: $expectedBuild")) {
-                Add-Result 'Packaged JAR metadata' 'PASS' "SHA-256 $jarHash; version $expectedVersion; build $expectedBuild."
+            Add-Result 'Existing packaged JAR metadata' 'PASS' "SHA-256 $jarHash; version $expectedVersion; build $expectedBuild."
+            if ($BuildCandidate) {
                 $candidateDir = Join-Path $repoRoot 'build\candidates'
                 $null = New-Item -ItemType Directory -Force -Path $candidateDir
                 $candidatePath = Join-Path $candidateDir "burp-mcp-$expectedVersion-$expectedBuild.jar"
@@ -300,6 +330,9 @@ try {
                 if ((Get-Sha256 $candidatePath) -eq $jarHash) {
                     Add-Result 'Candidate JAR preservation' 'PASS' "Preserved candidate SHA-256 $jarHash at $candidatePath; runtime deployment status is separate."
                 } else { Add-Result 'Candidate JAR preservation' 'FAIL' 'Candidate copy SHA-256 did not match the packaged JAR.' }
+            } else {
+                Add-Result 'Candidate JAR creation' 'UNVERIFIED' 'No candidate build was requested; the verified existing JAR was not copied or replaced.'
+            }
             } else { Add-Result 'Packaged JAR metadata' 'FAIL' 'JAR metadata did not match gradle.properties.' }
         } else { Add-Result 'Packaged JAR metadata' 'FAIL' 'Expected packaged JAR was not produced.' }
     } else {
@@ -312,12 +345,13 @@ try {
     $scriptTimer.Stop()
     $finishedAt = [DateTime]::UtcNow
     $counts = @{}
-    foreach ($statusName in @('PASS', 'FAIL', 'BLOCKED', 'INCONCLUSIVE', 'UNVERIFIED')) {
+    foreach ($statusName in @('PASS', 'FAIL', 'BLOCKED', 'INCONCLUSIVE', 'UNVERIFIED', 'UNSUPPORTED')) {
         $counts[$statusName] = @($results | Where-Object status -eq $statusName).Count
     }
     $report = [ordered]@{
         runId = $runId
         mode = $Mode
+        candidateBuildRequested = [bool]$BuildCandidate
         startedAtUtc = $startedAt.ToString('o')
         finishedAtUtc = $finishedAt.ToString('o')
         durationSeconds = [Math]::Round($scriptTimer.Elapsed.TotalSeconds, 2)
@@ -332,7 +366,7 @@ try {
     $lines.Add("- Started: $($startedAt.ToString('u'))")
     $lines.Add("- Finished: $($finishedAt.ToString('u'))")
     $lines.Add("- Duration: $([Math]::Round($scriptTimer.Elapsed.TotalSeconds, 2)) seconds")
-    $lines.Add("- Results: PASS $($counts.PASS), FAIL $($counts.FAIL), BLOCKED $($counts.BLOCKED), UNVERIFIED $($counts.UNVERIFIED)")
+    $lines.Add("- Results: PASS $($counts.PASS), FAIL $($counts.FAIL), BLOCKED $($counts.BLOCKED), INCONCLUSIVE $($counts.INCONCLUSIVE), UNVERIFIED $($counts.UNVERIFIED), UNSUPPORTED $($counts.UNSUPPORTED)")
     $lines.Add('')
     $lines.Add('| Check | Result | Evidence |')
     $lines.Add('|---|---|---|')
@@ -344,7 +378,7 @@ try {
     $lines.Add("JSON report: $(Split-Path -Leaf $reportJson)")
     $lines | Set-Content -LiteralPath $reportMarkdown -Encoding UTF8
     Write-Host "Validation reports: $reportMarkdown and $reportJson"
-    Write-Host "PASS=$($counts.PASS) FAIL=$($counts.FAIL) BLOCKED=$($counts.BLOCKED) UNVERIFIED=$($counts.UNVERIFIED)"
+    Write-Host "PASS=$($counts.PASS) FAIL=$($counts.FAIL) BLOCKED=$($counts.BLOCKED) INCONCLUSIVE=$($counts.INCONCLUSIVE) UNVERIFIED=$($counts.UNVERIFIED) UNSUPPORTED=$($counts.UNSUPPORTED)"
 }
 
 if (@($results | Where-Object status -eq 'FAIL').Count -gt 0) { exit 1 }
