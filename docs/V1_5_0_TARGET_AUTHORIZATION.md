@@ -1,4 +1,8 @@
-# v1.5.0 milestone 1: exact target rule preparation
+# v1.5.0 target authorization
+
+Current development status: milestone 2 implements bounded target-specific continuous
+request/response execution. See the milestone 2 section below. Milestone 1 notes
+are retained as implementation history; its execution block is superseded.
 
 Development starts at verified v1.4.0 commit `73274b38a783e503ef7557086dfde40554f32cee`.
 This milestone adds target-specific human authorization and disabled rule preparation.
@@ -63,3 +67,99 @@ The six listed test classes passed: 88 tests, zero failures, errors or skips.
 The exact MCP catalog test confirms all 86 previous tools plus the two new tools.
 The working and canonical v1.4.0 JAR SHA-256 values remain
 `930ba28d126fe7b296ad61ecd4bab830044dfc07bccb1dee484cd72a35dbe8c2`.
+
+## Milestone 2: live session binding and execution
+
+After preparing disabled rules, call `burp_start_target_rule_session` with one
+grant ID, 1–16 exact rule IDs and a 60–300 second session duration. The grant must
+have that much lifetime remaining. Burp displays a second **Approve once / Deny**
+dialog listing the exact targets, rule IDs, directions, actions and transformations.
+The rules and grant are revalidated after approval. Changed rule revisions, stale
+approvals, insufficient lifetime, disabled authentication, read-only mode and
+nonempty queues prevent activation. Modifications also require the existing
+Burp-local live-edit control. Local unattended mode cannot approve this operation.
+
+The grant binds to one generated session ID and immutable rule specifications.
+The existing engine activates the approved rules with TTL capped by the grant,
+session and rule deadlines. Rules do not authorize themselves. Emergency Stop
+revokes grants, invalidates pending approval epochs and preserves its engine latch.
+A new, explicit human-approved session is required to clear that latch.
+
+Automatic target processing uses the existing evaluator, transformation validator,
+materializer and engine commit transaction. It checks authorization before selection,
+before each speculative transformation, before materialization and at final release.
+No speculative edited object reaches a Proxy callback unless the final checks pass.
+The lock order is live session, rule engine, grant store; grant-store actions never
+acquire the engine lock. Scope/allowlist change callbacks increment an atomic policy
+revision without acquiring those locks. This also prevents restored scope or
+allowlist entries from reviving an old grant. Scope is read again at action boundaries.
+
+The target path has two nonblocking automatic processing slots and a 64 KiB limit
+for original requests, responses and edited output. Excess, unrelated, sensitive,
+revoked, expired, unsupported or conflicted traffic continues unchanged, without
+entering the manual decision queue or generating an automatic drop. Existing native
+Burp intercept behavior is preserved. The existing localhost manual queue and its
+timeout/drop semantics are unchanged.
+
+Each automatic message must match the exact granted scheme, host, port and raw path,
+its actual HTTP service and a single matching Host header. Only omitted default
+HTTP/HTTPS ports are canonicalized; credentials, fragments, encoded/traversal paths,
+path aliases and destination changes are refused. Safe queries can change within
+the same granted path, with credential checks on both original and proposed content.
+
+Responses require a one-use association with the session's observed request. The
+association checks the Proxy request/response pair ID, exact target, SHA-256 of the
+outgoing request bytes and active rule revisions. Paused/resumed rules, replay,
+wrong initiating requests, stale sessions and mismatched IDs cannot reuse it. The
+association cache stores only digests/IDs/revisions, is capped at 128 entries, and
+is cleared on session shutdown. Pair IDs use the documented Montoya
+[request/response correlation API](https://portswigger.github.io/burp-extensions-montoya-api/javadoc/burp/api/montoya/proxy/http/InterceptedRequest.html#messageId()).
+
+Cookie/Authorization input, credential-like content, compressed content, redirects
+and unsupported framing remain protected. No automatic disclosure, Cookie editing,
+WebSocket editing or automatic target DROP is introduced. Request/response
+modification and unchanged forwarding are the permitted target operations.
+
+### Development build and verification
+
+Development identity is `1.5.0-dev.2`, build `20261102.2-target-live-session-dev`.
+The MCP catalog has 89 tools: the original 86 and three target authorization tools.
+`-PdevelopmentBuild=true` builds under `build/dev-v1.5.0`; the working `.13` JAR
+and release/rollback directories are not replaced. No running extension reload is
+part of this milestone.
+
+`TargetLiveSessionTest` uses deterministic synthetic HTTP objects, a monotonic fake
+clock, mocked human dialogs, installed Proxy callbacks and latches. It tests successful
+request/response edits; exact origin, Host and service checks; operation restrictions;
+credential/payload/redirect rejection; response replay and association mismatches;
+grant/session/heartbeat expiry; scope/allowlist events; Emergency Stop; pause/delete;
+stale approvals and sessions; two simultaneous actions and unchanged excess traffic.
+Revocation is injected during request and response materialization to check that no
+edited object is committed afterward. These are synthetic tests, not external live
+verification. Existing localhost, queue, approval, authentication, credential-filter
+and embedded MCP transport regressions are also run.
+
+### Remaining limitations and next milestone
+
+The mechanism is implemented but has not been verified against a reloaded extension
+and an approved live service on Burp Professional 2024.1.1.1. The code compiles against
+the existing Montoya 2023.12.1 baseline. Strict exact-path/Host rules may intentionally
+leave real traffic unchanged; the bounded association cache can also evict requests.
+The next milestone should use a separately approved local service and supervised
+extension reload to verify real Proxy request/response association, native intercept
+behavior, expiry and emergency cleanup on the supported Burp runtime. Third-party
+testing and release publication require separate authorization.
+
+
+Focused milestone 2 command:
+
+```powershell
+.\gradlew.bat -PdevelopmentBuild=true --no-configuration-cache test --tests '*TargetLiveSessionTest' --console=plain
+```
+
+The session-binding transition also has a latch-controlled callback test: callbacks
+cannot observe a partially initialized target session and enter the manual queue.
+
+Final milestone 2 regression result: **154 tests passed**, zero failures, errors or
+skips, including all 21 `TargetLiveSessionTest` cases. Build identity and the exact
+89-tool catalog also passed. The running Burp extension was not reloaded.

@@ -32,6 +32,10 @@ internal fun requestMetadata(request: HttpRequest): SafeRequestMetadata {
 }
 
 fun Server.registerInterceptionTools(live: LiveInterception, api: MontoyaApi) {
+    mcpTool<BurpStartTargetRuleSession>("Requests human approval to bind one existing grant and exact prepared rule revisions to a bounded live session, then activates those rules. Unrelated, sensitive, expired or unapproved messages continue unchanged. No automatic renewal or disclosure.") {
+        live.startTargetRuleSession(grantId, ruleIds, durationSeconds)
+        "Approved target session started."
+    }
     mcpTool<BurpRequestTargetRuleAuthorization>("Requests explicit human approval for preparing disabled rules for 1..16 exact paths on one HTTP(S) host and port for up to 300 seconds. Requires existing Burp scope and exact host:port allowlist; never enables interception or execution.") {
         Json.encodeToString(live.requestTargetRuleAuthorization(urls, durationSeconds))
     }
@@ -280,3 +284,5 @@ internal fun redactedDiff(original: String, proposed: String): String {
 
 @Serializable data class BurpRequestTargetRuleAuthorization(val urls: List<String>, val durationSeconds: Int = 120)
 @Serializable data class BurpListTargetRuleAuthorizations(val includeDiagnostics: Boolean = false)
+
+@Serializable data class BurpStartTargetRuleSession(val grantId: String, val ruleIds: List<String>, val durationSeconds: Int = 60)

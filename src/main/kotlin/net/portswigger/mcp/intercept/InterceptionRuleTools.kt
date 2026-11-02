@@ -24,7 +24,7 @@ fun Server.registerInterceptionRuleTools(live: LiveInterception) {
     }
 
     mcpTool<BurpCreateInterceptionRule>(
-        "Creates a disabled, in-memory rule for a predefined localhost test URL or a currently human-approved exact preparation target. External activation remains unavailable in this milestone. Supports separate bounded maximum match and actual modification counts. Requires bearer-authenticated write mode, empty queues, and either a human-activated localhost test identity or an exact-path preparation grant. Rule creation never enables automatic processing."
+        "Creates a disabled, in-memory rule for a predefined localhost test URL or a currently human-approved exact preparation target. Target activation additionally requires explicit session approval binding the exact prepared rule revisions. Supports separate bounded maximum match and actual modification counts. Requires bearer-authenticated write mode, empty queues, and either a human-activated localhost test identity or an exact-path preparation grant. Rule creation never enables automatic processing."
     ) { Json.encodeToString(safeRuleOperation { live.createInterceptionRule(spec) }) }
 
     mcpTool<BurpListInterceptionRules>("Lists configured in-memory interception rules in priority order, including state, expiry and counters; never returns message bodies or identity secrets.") {
@@ -39,7 +39,7 @@ fun Server.registerInterceptionRuleTools(live: LiveInterception) {
         Json.encodeToString(safeRuleOperation { live.updateInterceptionRule(ruleId, spec) })
     }
 
-    mcpTool<BurpEnableInterceptionRule>("Enables a rule only inside a healthy, human-authorized interception session bound to the matching local test activation. The effective TTL is capped by rule, session and authorization expiry; no renewal occurs.") {
+    mcpTool<BurpEnableInterceptionRule>("Enables a rule only inside a healthy human-authorized session bound to its local test identity or exact target grant and rule revision. The effective TTL is capped by rule, session and authorization expiry; no renewal occurs.") {
         Json.encodeToString(safeRuleOperation { live.enableInterceptionRule(ruleId) })
     }
 

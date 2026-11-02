@@ -123,7 +123,7 @@ class McpServerIntegrationTest {
             
             val tools = client.listTools()
             assertFalse(tools.isEmpty(), "Server should have registered tools")
-            assertEquals(88, tools.size, "The Professional MCP catalog must retain the existing tools and expose the bounded interception-rule API")
+            assertEquals(89, tools.size, "The Professional MCP catalog must retain the existing tools and expose the bounded interception-rule API")
             assertEquals(tools.size, tools.map { it.name }.toSet().size, "MCP tool names must be unique")
             val expectedToolNames = setOf(
                 "base64_decode", "base64_encode",
@@ -141,7 +141,7 @@ class McpServerIntegrationTest {
                 "burp_create_interception_rule", "burp_list_interception_rules", "burp_get_interception_rule",
                 "burp_update_interception_rule", "burp_enable_interception_rule", "burp_disable_interception_rule",
                 "burp_delete_interception_rule", "burp_clear_interception_rules", "burp_preview_interception_rule",
-                "burp_get_interception_rule_stats", "burp_get_interception_rule_events", "burp_request_target_rule_authorization", "burp_list_target_rule_authorizations",
+                "burp_get_interception_rule_stats", "burp_get_interception_rule_events", "burp_request_target_rule_authorization", "burp_list_target_rule_authorizations", "burp_start_target_rule_session",
                 "burp_get_rule_engine_status",
                 "burp_clear_interception_rule_stats", "burp_pause_all_interception_rules", "burp_emergency_stop_rules",
                 "burp_list_pending_responses", "burp_modify_request", "burp_propose_intercepted_request_edit",

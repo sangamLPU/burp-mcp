@@ -164,7 +164,8 @@ internal data class RuleEvaluation(
 internal class InterceptionRuleEngine(
     private val nanoTime: () -> Long = System::nanoTime,
     private val currentTimeMillis: () -> Long = System::currentTimeMillis,
-    private val approvedPreparationTarget: (InterceptionRuleSpec) -> Boolean = { false }
+    private val approvedPreparationTarget: (InterceptionRuleSpec) -> Boolean = { false },
+    private val approvedExecutionTarget: (String, InterceptionRuleSpec) -> Boolean = { _, _ -> false }
 ) {
     companion object {
         const val MAX_RULES = 64
@@ -223,6 +224,8 @@ internal class InterceptionRuleEngine(
 
     fun validateForAuthorization(spec: InterceptionRuleSpec) = validateRuleSpec(spec)
 
+    @Synchronized fun authorizationRevision(id: String): Long = (rules[id] ?: error("Unknown interception rule")).generation
+
     @Synchronized fun get(id: String): InterceptionRuleView { expireDueLocked(); return view(rules[id] ?: error("Unknown interception rule")) }
     @Synchronized fun list(): List<InterceptionRuleView> {
         expireDueLocked()
@@ -244,7 +247,7 @@ internal class InterceptionRuleEngine(
         check(!emergencyStopped) { "Rule engine is emergency-stopped; activate fresh local authorization in Burp first" }
         require(effectiveDurationMillis in 1..TimeUnit.SECONDS.toMillis(MAX_TTL_SECONDS.toLong())) { "Rule duration is outside the bounded limit" }
         val rule = rules[id] ?: error("Unknown interception rule")
-        check(rule.spec.targetUrl in LocalTestTargets.urls || rule.spec.targetUrl == LocalTestTargets.RULE_AUTHORITY_URL) { "Target-specific rule execution is not implemented in this milestone" }
+        check(isLocalTarget(rule.spec) || approvedExecutionTarget(id, rule.spec)) { "Target rule lacks an approved session binding" }
         check(rule.state != InterceptionRuleState.ACTIVE) { "Rule is already active" }
         check(rule.matchBudgetConsumed < rule.spec.maximumMatches) { "Rule reached its maximum match count" }
         check(rule.spec.action != RuleAction.MODIFY_AND_FORWARD || rule.modificationBudgetConsumed < rule.spec.maximumModifications) { "Rule reached its maximum modification count" }
@@ -333,7 +336,7 @@ internal class InterceptionRuleEngine(
         val matched = mutableListOf<Candidate>()
         val skipped = mutableListOf<Pair<Candidate,String>>()
         snapshot.forEach { candidate ->
-            if (candidate.used >= candidate.spec.maximumMatches || !targetMatches(candidate.spec.targetUrl, message.targetUrl) ||
+            if ((!isLocalTarget(candidate.spec) && !approvedExecutionTarget(candidate.id, candidate.spec)) || candidate.used >= candidate.spec.maximumMatches || !targetMatches(candidate.spec.targetUrl, message.targetUrl) ||
                 !directionMatches(candidate.spec.direction, message.direction)) return@forEach
             when (val result = RuleTransformations.matches(candidate.spec.conditions, message)) {
                 MatchResult.MATCH -> matched += candidate
@@ -393,6 +396,7 @@ internal class InterceptionRuleEngine(
             var output = message
             val modifiedRules = linkedSetOf<String>()
             transformations.forEach { (candidate, t) ->
+                if (!isLocalTarget(candidate.spec) && !approvedExecutionTarget(candidate.id, candidate.spec)) throw RuleAuthorizationRequired("TARGET_AUTHORIZATION_ENDED")
                 val next = RuleTransformations.apply(output, t)
                 if (!RuleTransformations.byteAndMetadataEqual(output, next)) modifiedRules += candidate.id
                 output = next
@@ -573,7 +577,7 @@ internal class InterceptionRuleEngine(
     private fun expireDueLocked() = rules.values.forEach(::expireRuleIfDue)
     private fun expireRuleIfDue(rule: MutableRule) {
         if (rule.spec.targetUrl !in LocalTestTargets.urls && rule.spec.targetUrl != LocalTestTargets.RULE_AUTHORITY_URL &&
-            !approvedPreparationTarget(rule.spec) && rule.state !in setOf(InterceptionRuleState.AUTHORIZATION_ENDED, InterceptionRuleState.EMERGENCY_STOPPED)) {
+            (!approvedPreparationTarget(rule.spec) || (rule.state == InterceptionRuleState.ACTIVE && !approvedExecutionTarget(rule.id, rule.spec))) && rule.state !in setOf(InterceptionRuleState.AUTHORIZATION_ENDED, InterceptionRuleState.EMERGENCY_STOPPED)) {
             invalidateReservationsFor(rule.id, "TARGET_AUTHORIZATION_ENDED")
             rule.generation++; rule.state = InterceptionRuleState.AUTHORIZATION_ENDED
             rule.deadlineNanos = null; rule.expiresAtEpochMillis = null
@@ -621,7 +625,11 @@ internal class InterceptionRuleEngine(
         headers = Collections.unmodifiableList(message.headers.map { it.copy() }),
         body = message.body.copyOf()
     )
+    private fun isLocalTarget(spec: InterceptionRuleSpec) = spec.targetUrl in LocalTestTargets.urls || spec.targetUrl == LocalTestTargets.RULE_AUTHORITY_URL
     private fun targetMatches(ruleTarget: String, actual: String): Boolean {
+        if (ruleTarget !in LocalTestTargets.urls && ruleTarget != LocalTestTargets.RULE_AUTHORITY_URL) {
+            return runCatching { TargetRuleAuthorization.validateUrls(listOf(actual)); ruleTarget == actual }.getOrDefault(false)
+        }
         val uri = runCatching { URI(actual) }.getOrNull() ?: return false
         if (uri.userInfo != null || uri.rawFragment != null || uri.scheme != "http" || uri.host != LocalTestTargets.HOST || uri.port != LocalTestTargets.PORT) return false
         val path = uri.rawPath.ifBlank { "/" }

@@ -50,7 +50,7 @@ data class InterceptionHealth(
     val queueCapacity: Int
 )
 
-class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : AutoCloseable {
+class LiveInterception(private val api: MontoyaApi, val config: McpConfig, private val nanoTime: () -> Long = System::nanoTime) : AutoCloseable {
     companion object {
         const val CLIENT_LEASE_SECONDS = 15
         const val HEARTBEAT_INTERVAL_SECONDS = 3
@@ -64,12 +64,15 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
     }
 
     val queue = DecisionQueue<HeldMessage>()
-    internal val targetRuleAuthorizations = TargetRuleAuthorization(::targetPreparationEligible)
-    internal val ruleEngine = InterceptionRuleEngine(approvedPreparationTarget = targetRuleAuthorizations::permits)
+    private val targetPolicyRevision = java.util.concurrent.atomic.AtomicLong()
+    private val targetPolicyChanged: () -> Unit = { targetPolicyRevision.incrementAndGet() }
+    private val targetPolicyListener = config.addTargetsChangeListener(targetPolicyChanged)
+    internal val targetRuleAuthorizations = TargetRuleAuthorization(::targetPreparationEligible, nanoTime, targetPolicyRevision::get)
+    internal val ruleEngine = InterceptionRuleEngine(nanoTime = nanoTime, approvedPreparationTarget = targetRuleAuthorizations::permits, approvedExecutionTarget = ::targetExecutionEligible)
 
     private fun targetPreparationEligible(url: String): Boolean = runCatching {
         val uri = URI(url)
-        !closed && !enabled && config.requireBearerToken && !config.readOnlyMode &&
+        !closed && config.requireBearerToken && !config.readOnlyMode &&
             config.getAutoApproveTargetsList().any { it.equals("${uri.host}:${uri.port}", ignoreCase = true) } &&
             api.scope().isInScope(url)
     }.getOrDefault(false)
@@ -82,11 +85,156 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
     }
 
     fun targetRuleAuthorizationStatus(): List<TargetRuleGrant> = targetRuleAuthorizations.list()
+    @Volatile private var targetSession = false
+    private val targetSlots = Semaphore(2)
+    private data class TargetAssociation(val session: String, val target: String, val fingerprint: String, val revisions: Map<String, Long>)
+    private val targetAssociations = linkedMapOf<Int, TargetAssociation>()
+
+    private fun targetSessionHealthy(): Boolean {
+        val now = nanoTime()
+        return targetSession && enabled && !closed && heartbeatHealth == "HEALTHY" &&
+            (sessionDeadlineNanos ?: 0) > now &&
+            lastHeartbeatNanos?.let { now - it < TimeUnit.SECONDS.toNanos(CLIENT_LEASE_SECONDS.toLong()) } == true &&
+            config.requireBearerToken && !config.readOnlyMode
+    }
+
+    private fun targetExecutionEligible(id: String, spec: InterceptionRuleSpec): Boolean =
+        targetSessionHealthy() &&
+            (allowEdits || spec.action != RuleAction.MODIFY_AND_FORWARD) &&
+            targetRuleAuthorizations.permitsExecution(id, spec, currentSessionId)
+
+    /** The second approval names immutable rule revisions and operations; preparation alone cannot execute. */
+    suspend fun startTargetRuleSession(grantId: String, ruleIds: List<String>, seconds: Int): InterceptionHealth {
+        require(ruleIds.size in 1..16 && ruleIds.distinct().size == ruleIds.size)
+        require(seconds in MIN_SESSION_LIFETIME_SECONDS..300)
+        val epoch = targetRuleAuthorizations.approvalEpoch()
+        val revisions = ruleIds.associateWith { ruleEngine.authorizationRevision(it) }
+        val specs = synchronized(this) {
+            check(!enabled && !closed && !unattendedMode.snapshot().active)
+            check(queue.list("request").isEmpty() && queue.list("response").isEmpty())
+            ruleIds.associateWith { id -> ruleEngine.get(id).also { check(it.state != InterceptionRuleState.ACTIVE) }.spec }
+        }
+        check(specs.values.all { it.authorizationReference == grantId && targetRuleAuthorizations.permits(it) &&
+            it.targetUrl !in LocalTestTargets.urls && it.action != RuleAction.DROP }) { "Invalid target session rules or operations" }
+        check(targetRuleAuthorizations.remainingMillis(grantId) >= seconds * 1000L)
+        val details = "Start automatic target rule session for ${seconds}s. No renewal or automatic disclosure. " +
+            "Unrelated, sensitive or revoked traffic continues unchanged.\n" + specs.entries.joinToString("\n") {
+                "Rule ${it.key}: ${it.value.targetUrl}; ${it.value.direction}; ${it.value.action}; transforms=${it.value.transformations}"
+            }
+        check(details.length <= 16_000) { "Approval details exceed the review limit" }
+        check(StateChangeSecurity.confirm(api, config, "Approve bounded target rule execution", details)) { "Target session denied" }
+        return synchronized(this) {
+            check(!enabled && !closed && !unattendedMode.snapshot().active)
+            check(queue.list("request").isEmpty() && queue.list("response").isEmpty())
+            check(epoch == targetRuleAuthorizations.approvalEpoch()) { "Stale session approval" }
+            check(revisions.all { (id, revision) -> ruleEngine.authorizationRevision(id) == revision }) { "Rule revision changed during approval" }
+            check(specs.all { (id, spec) -> ruleEngine.get(id).let { it.spec == spec && it.state != InterceptionRuleState.ACTIVE } }) { "Rule changed during approval" }
+            check(specs.values.all { targetRuleAuthorizations.permits(it) && (allowEdits || it.action != RuleAction.MODIFY_AND_FORWARD) })
+            check(targetRuleAuthorizations.remainingMillis(grantId) >= seconds * 1000L) { "Insufficient grant lifetime" }
+            startApprovedSession(seconds)
+            try {
+                targetRuleAuthorizations.bind(grantId, currentSessionId!!, specs, epoch)
+                targetSession = true
+                ruleEngine.freshHumanActivation()
+                specs.keys.forEach { enableInterceptionRule(it) }
+                health()
+            } catch (error: Exception) {
+                endSession("TARGET_BINDING_FAILED")
+                throw error
+            }
+        }
+    }
+
+    private fun exactTarget(request: HttpRequest): String? = runCatching {
+        val u = URI(request.url())
+        require(u.rawUserInfo == null && u.rawFragment == null)
+        val port = if (u.port == -1) when (u.scheme) { "http" -> 80; "https" -> 443; else -> -1 } else u.port
+        val target = "${u.scheme}://${u.host}:$port${u.rawPath}"
+        TargetRuleAuthorization.validateUrls(listOf(target))
+        val service = request.httpService()
+        require(service.host() == u.host && service.port() == port && service.secure() == (u.scheme == "https"))
+        val hosts = request.headers().filter { it.name().equals("Host", true) }.map { it.value() }
+        require(hosts.size == 1 && (hosts.single() == "${u.host}:$port" ||
+            (port == (if (u.scheme == "https") 443 else 80) && hosts.single() == u.host)))
+        require(request.path() == u.rawPath + (u.rawQuery?.let { "?$it" } ?: ""))
+        require(api.scope().isInScope(request.url()) && targetPreparationEligible(target))
+        target
+    }.getOrNull()
+
+    private fun targetFingerprint(request: HttpRequest): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(request.toByteArray().getBytes()).joinToString("") { "%02x".format(it) }
+
+    /** Bounded automatic path: no manual queue, network I/O, disclosure, drop or wait. */
+    internal fun processTargetMessage(kind: String, original: HeldMessage, messageId: Int): HeldMessage {
+        if (!targetSlots.tryAcquire()) return original
+        try {
+            if (SwingUtilities.isEventDispatchThread() || kind !in setOf("request", "response")) return original
+            if ((kind == "request") != (original.message is HttpRequest)) return original
+            if (kind == "response" && original.message !is HttpResponse) return original
+            val target = exactTarget(original.request) ?: return original
+            if (original.message.toByteArray().length() > InterceptionRuleEngine.MAX_MESSAGE_BYTES ||
+                original.request.toByteArray().length() > InterceptionRuleEngine.MAX_MESSAGE_BYTES ||
+                hasSensitiveContent(original.request, original.message)) return original
+            val fingerprint = targetFingerprint(original.request)
+            if (kind == "request" && original.message !== original.request) return original
+            if (kind == "response" && original.message is InterceptedResponse &&
+                targetFingerprint(original.message.initiatingRequest()) != fingerprint) return original
+            val snapshot = synchronized(this) {
+                val session = currentSessionId ?: return original
+                val specs = ruleEngine.list().filter { it.state == InterceptionRuleState.ACTIVE && it.spec.targetUrl == target && targetExecutionEligible(it.id, it.spec) }
+                    .associate { it.id to it.spec }
+                if (specs.isEmpty()) return original
+                if (kind == "response") {
+                    val associated = targetAssociations.remove(messageId) ?: return original
+                    if (associated.session != session || associated.target != target || associated.fingerprint != fingerprint ||
+                        associated.revisions != specs.mapValues { ruleEngine.authorizationRevision(it.key) }) return original
+                }
+                session to specs
+            }
+            val input = toRuleHttpMessage(kind, original, "target-$messageId") ?: return original
+            val evaluation = ruleEngine.evaluate(input)
+            fun release(output: HeldMessage): HeldMessage {
+                val outputFingerprint = targetFingerprint(output.request)
+                check(exactTarget(output.request) == target && !hasSensitiveContent(output.request, output.message))
+                check(output.message.toByteArray().length() <= InterceptionRuleEngine.MAX_MESSAGE_BYTES)
+                check(currentSessionId == snapshot.first && snapshot.second.all { (id, spec) ->
+                    targetExecutionEligible(id, spec) && ruleEngine.get(id).let { it.state == InterceptionRuleState.ACTIVE && it.spec == spec }
+                }) { "Target authorization changed" }
+                val releaseRevisions = snapshot.second.mapValues { ruleEngine.authorizationRevision(it.key) }
+                return targetRuleAuthorizations.commit(snapshot.second, snapshot.first) {
+                    check(targetSessionHealthy() && currentSessionId == snapshot.first)
+                    if (kind == "request") {
+                        while (targetAssociations.size >= 128) targetAssociations.remove(targetAssociations.keys.first())
+                        targetAssociations[messageId] = TargetAssociation(snapshot.first, target, outputFingerprint,
+                            releaseRevisions)
+                    }
+                    output
+                }
+            }
+            return synchronized(this) {
+                if (evaluation == null) {
+                    // Response-only rules still need a request association; the request continues unchanged.
+                    if (kind == "request") release(original) else original
+                } else if (evaluation.status != RuleEvaluationStatus.READY || evaluation.action == RuleAction.DROP) {
+                    ruleEngine.finish(evaluation, "SKIPPED", "NONE", "TARGET_ACTION_NOT_AUTHORIZED")
+                    original
+                } else ruleEngine.commit(evaluation) {
+                    check(currentSessionId == snapshot.first && snapshot.second.all { (id, spec) -> targetExecutionEligible(id, spec) })
+                    val output = if (evaluation.changed) applyRuleOutput(original, evaluation.output) else original
+                    check(RequestRateLimiter.tryAcquire()) { "Request rate limit exceeded" }
+                    release(output)
+                } ?: original
+            }
+        } catch (_: Exception) {
+            ActivityLog.record("target_rule", "skipped", "TARGET_POLICY_OR_ASSOCIATION_REJECTED")
+            return original
+        } finally { targetSlots.release() }
+    }
     @Volatile var enabled = false; private set
     @Volatile var allowEdits = false
     @Volatile var timeoutSeconds = config.interceptionTimeoutSeconds; private set
     @Volatile var configuredSessionLifetimeSeconds = DEFAULT_SESSION_LIFETIME_SECONDS; private set
-    @Volatile private var lastClientNanos = System.nanoTime()
+    @Volatile private var lastClientNanos = nanoTime()
     @Volatile private var lastHeartbeatNanos: Long? = null
     @Volatile private var nextHeartbeatNanos: Long? = null
     @Volatile private var sessionDeadlineNanos: Long? = null
@@ -105,8 +253,14 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
     private val timer = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "burp-mcp-interception-expiry").apply { isDaemon = true } }
 
     fun install() {
+        registrations += api.scope().registerScopeChangeHandler { targetPolicyChanged() }
         registrations += api.proxy().registerRequestHandler(object : ProxyRequestHandler {
             override fun handleRequestReceived(request: InterceptedRequest): ProxyRequestReceivedAction {
+                val mode = callbackMode()
+                if (mode != 1) {
+                    val result = if (mode == 2) processTargetMessage("request", HeldMessage(request, request), request.messageId()) else HeldMessage(request, request)
+                    return ProxyRequestReceivedAction.continueWith(result.message as HttpRequest)
+                }
                 val skip = captureSkipReason(request, request)
                 if (skip != null) {
                     logCaptureSkip("request", request, skip)
@@ -124,6 +278,11 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         registrations += api.proxy().registerResponseHandler(object : ProxyResponseHandler {
             override fun handleResponseReceived(response: InterceptedResponse): ProxyResponseReceivedAction {
                 val request = response.initiatingRequest()
+                val mode = callbackMode()
+                if (mode != 1) {
+                    val result = if (mode == 2) processTargetMessage("response", HeldMessage(response, request), response.messageId()) else HeldMessage(response, request)
+                    return ProxyResponseReceivedAction.continueWith(result.message as HttpResponse)
+                }
                 val skip = captureSkipReason(response, request)
                 if (skip != null) {
                     logCaptureSkip("response", request, skip)
@@ -148,7 +307,7 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         }, 1, 1, TimeUnit.SECONDS)
     }
 
-    @Synchronized fun touch() { lastClientNanos = System.nanoTime() }
+    @Synchronized fun touch() { lastClientNanos = nanoTime() }
 
     @Synchronized fun setConfiguredSessionLifetime(seconds: Int) {
         require(seconds in MIN_SESSION_LIFETIME_SECONDS..MAX_SESSION_LIFETIME_SECONDS) {
@@ -168,7 +327,10 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         check(!closed) { "Extension has unloaded" }
         check(config.requireBearerToken) { "Enable MCP bearer authentication before live interception" }
         validateSessionLifetime(seconds)
-        val nowNanos = System.nanoTime()
+        if (enabled) endSession("SESSION_REPLACED")
+        targetSession = false
+        targetAssociations.clear()
+        val nowNanos = nanoTime()
         val nowMillis = System.currentTimeMillis()
         val durationNanos = TimeUnit.SECONDS.toNanos(seconds.toLong())
         configuredSessionLifetimeSeconds = seconds
@@ -200,7 +362,7 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         endSession(reason)
     }
 
-    @Synchronized internal fun heartbeatTick(nowNanos: Long = System.nanoTime()) {
+    @Synchronized internal fun heartbeatTick(nowNanos: Long = nanoTime()) {
         if (!enabled) return
         if (!config.requireBearerToken) { endSession("AUTHENTICATION_DISABLED"); return }
         val deadline = sessionDeadlineNanos
@@ -223,7 +385,7 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         }
     }
 
-    @Synchronized fun health(nowNanos: Long = System.nanoTime()): InterceptionHealth {
+    @Synchronized fun health(nowNanos: Long = nanoTime()): InterceptionHealth {
         expireUnattendedModeLocked()
         val sessionDeadline = sessionDeadlineNanos
         val leaseExpiry = if (enabled) lastClientNanos + TimeUnit.SECONDS.toNanos(CLIENT_LEASE_SECONDS.toLong()) else null
@@ -249,9 +411,11 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
     }
 
     private fun endSession(reason: String) {
-        targetRuleAuthorizations.revokeAll()
         val wasActive = enabled
         enabled = false
+        targetSession = false
+        targetAssociations.clear()
+        targetRuleAuthorizations.revokeAll()
         heartbeatHealth = when (reason) {
             "SESSION_EXPIRED", "HEARTBEAT_MISSED" -> "EXPIRED"
             else -> "STOPPED"
@@ -273,6 +437,11 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         if (wasActive) ActivityLog.record("intercept_session", "ended", reason)
     }
     fun authorized(request: HttpRequest) = runCatching { isAuthorizedRequest(request, api, config) }.getOrDefault(false)
+
+    // Read mode under the same monitor as start/stop/bind, never observing a half-bound session.
+    private fun callbackMode(): Int = synchronized(this) {
+        when { !enabled || closed -> 0; targetSession -> 2; else -> 1 }
+    }
 
     private fun captureSkipReason(message: HttpMessage, request: HttpRequest): CaptureSkip? {
         if (!enabled) return CaptureSkip("live interception session is disabled", mustDrop = false)
@@ -306,6 +475,9 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
 
     private fun hold(kind: String, value: HeldMessage): HeldMessage? {
         val ticket = synchronized(this) {
+            // A callback selected under the former manual session must not enter its queue
+            // after a newly approved target session has replaced that session.
+            if (targetSession) return value
             if (!enabled || closed) {
                 ActivityLog.record("intercept_capture", "dropped", "session ended before queue capture")
                 return null
@@ -413,7 +585,7 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
     private fun toRuleHttpMessage(kind: String, held: HeldMessage, messageId: String): RuleHttpMessage? = runCatching {
         val uri = URI(held.request.url())
         val path = uri.rawPath.ifBlank { "/" }
-        val target = "${uri.scheme}://${uri.host}:${uri.port}$path"
+        val target = if (targetSession) exactTarget(held.request) ?: error("Target identity changed") else "${uri.scheme}://${uri.host}:${uri.port}$path"
         val message = held.message
         RuleHttpMessage(
             direction = if (kind == "request") RuleDirection.REQUEST else RuleDirection.RESPONSE,
@@ -590,7 +762,13 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         check(config.requireBearerToken && !config.readOnlyMode) { "Authenticated write access is required to enable a rule" }
         expireUnattendedModeLocked()
         val rule = ruleEngine.get(id)
-        check(rule.spec.targetUrl in LocalTestTargets.urls || rule.spec.targetUrl == LocalTestTargets.RULE_AUTHORITY_URL) { "Target-specific rule execution is not implemented in this milestone" }
+        if (rule.spec.targetUrl !in LocalTestTargets.urls && rule.spec.targetUrl != LocalTestTargets.RULE_AUTHORITY_URL) {
+            check(targetExecutionEligible(id, rule.spec)) { "Target rule lacks an approved session binding" }
+            val duration = minOf(rule.spec.durationSeconds * 1000L, targetRuleAuthorizations.remainingMillis(rule.spec.authorizationReference),
+                ((sessionDeadlineNanos ?: 0) - nanoTime()) / 1_000_000)
+            check(duration > 0 && (allowEdits || rule.spec.action != RuleAction.MODIFY_AND_FORWARD))
+            return ruleEngine.enable(id, duration)
+        }
         val mode = unattendedMode.snapshot()
         check(mode.active && mode.testRunId == rule.spec.authorizationReference) { "Rule authorization reference does not match the active test run" }
         ruleEngine.validateForAuthorization(rule.spec)
@@ -726,7 +904,7 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         val job = currentCoroutineContext()[Job]
         if (job != null) reviewJobs[ticket.id] = job
         try {
-            return withTimeout(((ticket.deadline-System.nanoTime())/1_000_000).coerceAtLeast(1)) {
+            return withTimeout(((ticket.deadline-nanoTime())/1_000_000).coerceAtLeast(1)) {
                 check(enabled && !closed) { "Interception was cancelled" }
                 // Plain text preserves both messages exactly; do not parse the combined review as a request editor.
                 Dialogs.requestOption(findBurpFrame(),message,options,requestContent,title=title)==0
@@ -758,7 +936,7 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         val approved = review(ticket,
             "Review this exact live ${ticket.kind} revision locally. Approve forwarding once? The AI cannot approve it.\n\n" +
                 "Request ID: ${ticket.id}\nTarget: ${metadata.hostname}\n${metadata.method} ${metadata.urlPath}\n" +
-                "${((ticket.deadline - System.nanoTime()).coerceAtLeast(0) / 1_000_000) / 1000}s hold time remains.",
+                "${((ticket.deadline - nanoTime()).coerceAtLeast(0) / 1_000_000) / 1000}s hold time remains.",
             arrayOf("Approve once", "Deny"),
             "Approve live request forwarding")
         if (!approved) { ActivityLog.record("intercept_approve", "denied", id); error("User denied approval") }
@@ -781,7 +959,7 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         if (autoDecision.decision == LocalTestPolicyDecision.AUTO_APPROVE) return
         if (autoDecision.decision == LocalTestPolicyDecision.DENY) error("Unattended policy denied this message drop: ${autoDecision.reason}")
         val metadata = requestMetadata(ticket.original.request)
-        val remaining = ((ticket.deadline - System.nanoTime()).coerceAtLeast(0) / 1_000_000) / 1000
+        val remaining = ((ticket.deadline - nanoTime()).coerceAtLeast(0) / 1_000_000) / 1000
         ActivityLog.record("intercept_drop_approval", "prompted", "${ticket.kind} ${ticket.id} revision=${ticket.revision}")
         val approved = review(
             ticket,
@@ -910,7 +1088,7 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
             revision = ticket.revision,
             messageState = state,
             messageApproved = ticket.approvedRevision == ticket.revision,
-            messageRemainingMillis = ((ticket.deadline - System.nanoTime()).coerceAtLeast(0) / 1_000_000),
+            messageRemainingMillis = ((ticket.deadline - nanoTime()).coerceAtLeast(0) / 1_000_000),
             pendingMessageCount = health.pendingRequests + health.pendingResponses,
             destinationHost = service?.host(),
             destinationPort = service?.port(),
@@ -961,6 +1139,7 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         synchronized(this) { closed = true; endSession("UNLOADED") }
         disclosureScope.cancel()
         timer.shutdownNow()
+        targetPolicyListener.remove()
         registrations.forEach { runCatching { it.deregister() } }
         registrations.clear()
     }
