@@ -103,6 +103,17 @@ class AuthenticationPreflightTests(unittest.TestCase):
         self.assertEqual("2025-03-26", result["protocolVersion"])
         self.assertTrue(connection.closed)
 
+    def test_stateless_requests_send_negotiated_protocol_without_session_header(self):
+        connection = FakeConnection()
+        client = self.client(lambda *_a, **_k: connection)
+        client._protocol_version = "2025-06-18"
+        with patch.dict(os.environ, {"BURP_MCP_TOKEN": FAKE_TOKEN}, clear=True):
+            client.rpc("ping")
+        headers = connection.request_args[3]
+        self.assertEqual("2025-06-18", headers["MCP-Protocol-Version"])
+        self.assertNotIn("Mcp-Session-Id", headers)
+        self.assertTrue(connection.closed)
+
     def test_401_stale_or_incorrect_token_is_classified_safely(self):
         connection = FakeConnection(FakeResponse(status=401, body=b"sensitive server detail"))
         with patch.dict(os.environ, {"BURP_MCP_TOKEN": FAKE_TOKEN}, clear=True):

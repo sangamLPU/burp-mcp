@@ -5,8 +5,8 @@ import java.util.jar.Manifest
 /** Build identity compiled into the extension and exposed through existing MCP status tools. */
 internal object BuildInfo {
     const val version: String = "1.4.0"
-    const val buildId: String = "20261101.12-burp2024.1.1.1"
-    const val serverVersion: String = "1.4.0+20261101.12-burp2024.1.1.1"
+    const val buildId: String = "20261101.13-burp2024.1.1.1"
+    const val serverVersion: String = "1.4.0+20261101.13-burp2024.1.1.1"
 
     /** Checks packaging metadata without using it as the runtime source of identity. */
     fun matchesManifest(manifest: Manifest?): Boolean {

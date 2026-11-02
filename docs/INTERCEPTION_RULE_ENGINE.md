@@ -28,19 +28,23 @@ The `targetUrl` must be one exact URL from this list, or the fixed authority `ht
 
 An operator must activate Unattended Local Test Mode through its existing visible Burp control. MCP rule tools cannot activate or renew it. The authenticated rule configuration must reference the current synthetic **test-run ID**. The server identity and bearer token are not placed in rule configuration. Each automatic operation is checked again against the current authorization and session; rule TTL is capped by the remaining time in both. Ending the session pauses active rules. Deactivating unattended mode pauses them immediately. There is no automatic renewal.
 
-The existing local “live edits” control must be enabled for `MODIFY_AND_FORWARD`. The existing read-only setting must remain off. Native Proxy Intercept is a separate Burp control and is not changed by rules.
+The existing local “live edits” control must be enabled for `MODIFY_AND_FORWARD`. The existing read-only setting must remain off. Native Proxy Intercept is a separate Burp control and is not changed by rules. The live-test coordinator requests that native interception be disabled before it starts the bounded session; Burp's separate `Approve once` prompt remains human-controlled.
+
+Automatic response edits are permitted only when the response rule is active and the response belongs to a synthetic request that already passed the unattended policy as an automatic test request. The response still has to pass its own target, status, content-type, JSON-condition, session, identity, scope and authorization checks. A missing, disabled, unmatched, skipped or policy-rejected response rule leaves the response in the existing manual-review queue. The coordinator reports `WAITING_FOR_APPROVAL`, stops sending further test requests, disables and deletes only its owned rules, and stops the fixture. The held response remains available through Burp's existing manual approval path; the coordinator never approves, forwards, drops or retries it.
 
 ## Rule lifecycle
 
 1. Authenticate to the loopback MCP endpoint.
 2. Explicitly activate Unattended Local Test Mode in Burp.
 3. Confirm the exact localhost scope/allowlist and empty request/response queues.
-4. Create rules while the live-interception session is stopped. Rules are created disabled.
-5. Start the existing bounded interception session. Its usual local approval policy applies.
-6. Enable each rule. Enabling requires a healthy session bound to the current local authorization and empty queues.
-7. Send only synthetic traffic through Burp Proxy. Burp evaluates the rules on each matching request and response.
-8. Read rule statistics/events as needed. Pause or disable rules explicitly when done.
-9. Stop the session or deactivate unattended mode. Active rules pause; they do not resume automatically.
+4. Start the identity-bound local fixture and create all request and response rules while the live-interception session is stopped. Rules are created disabled.
+5. Disable native Proxy Intercept through its separate supported control and complete Burp's `Approve once` prompt if shown.
+6. Start the existing bounded interception session. Its usual local approval policy applies.
+7. Enable every rule needed for the planned exchanges, including the response rule, then verify exact rule state, priority, conditions, empty queues, active identity and remaining session/authorization time before sending the first request. Reject incomplete setup without sending traffic.
+8. Send only synthetic traffic through Burp Proxy. Burp evaluates the rules on each matching request and its associated response.
+9. If a response stays held, surface `WAITING_FOR_APPROVAL` promptly and stop the sequence; keep the existing human approval path intact.
+10. Read rule statistics/events as needed. Pause or disable rules explicitly when done.
+11. Stop the session or deactivate unattended mode. Active rules pause; they do not resume automatically.
 
 The MCP API provides:
 

@@ -6,6 +6,7 @@ param(
     [ValidateRange(1, 86400)] [int]$MaxRunSeconds = 1800,
     [ValidateRange(0, 10000)] [int]$TimeoutDelayMilliseconds = 2000,
     [switch]$IdentityFromEnvironment,
+    [switch]$RuleEngineTestMode,
     [string]$TestRunId = '',
     [string]$ServerIdentity = ''
 )
@@ -514,11 +515,14 @@ try {
             }
 
             $postBodyVerified = $null
+            $postEnabled = $null
+            $postJson = $null
             if ($path -eq '/test-post') {
                 $postBodyVerified = $false
                 try {
                     $postJson = ConvertFrom-Json -InputObject $requestBody -ErrorAction Stop
                     $postBodyVerified = ($postJson.name -eq 'original' -and $postJson.mcp_test -eq 'after')
+                    if ($postJson.PSObject.Properties.Name -contains 'enabled') { $postEnabled = $postJson.enabled }
                 } catch { }
             }
             $testCookieVerified = $null
@@ -670,6 +674,16 @@ try {
                 cancellationTestIdVerified = $cancellationTestIdVerified
                 cancellationRequestVerified = $cancellationRequestVerified
             }
+            if ($RuleEngineTestMode) {
+                $ruleTestId = $null
+                if ($requestHeaders.ContainsKey('X-MCP-Test-ID') -and $requestHeaders['X-MCP-Test-ID'] -match '^[A-Za-z0-9_-]{1,64}$') {
+                    $ruleTestId = $requestHeaders['X-MCP-Test-ID']
+                }
+                $record['ruleTestId'] = $ruleTestId
+                $record['postEnabled'] = $postEnabled
+                $record['ruleTestHeaderObserved'] = $requestHeaders.ContainsKey('X-MCP-Rule-Test') -and $requestHeaders['X-MCP-Rule-Test'] -ceq 'active'
+                $record['pauseHeaderObserved'] = $requestHeaders.ContainsKey('X-MCP-Pause-Forward') -and $requestHeaders['X-MCP-Pause-Forward'] -ceq 'active'
+            }
             $recordJson = ConvertTo-Json -InputObject $record -Compress -Depth 4
             [System.IO.File]::AppendAllText($LogPath, $recordJson + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
 
@@ -791,7 +805,24 @@ try {
                 }
                 '/test-post' {
                     $contentType = 'application/json; charset=utf-8'
-                    $responseBody = $requestBody
+                    if ($RuleEngineTestMode) {
+                        if ($null -eq $postJson -or $postJson -isnot [pscustomobject]) {
+                            $status = '400 Bad Request'
+                            $responseBody = 'Rule-engine test mode requires a JSON object.'
+                            break
+                        }
+                        $postResponse = [ordered]@{}
+                        foreach ($property in $postJson.PSObject.Properties) {
+                            $postResponse[$property.Name] = $property.Value
+                        }
+                        $postResponse['enabled'] = $false
+                        $responseBody = ConvertTo-Json -InputObject $postResponse -Compress -Depth 16
+                        if ($requestHeaders.ContainsKey('X-MCP-Pause-Forward') -and $requestHeaders['X-MCP-Pause-Forward'] -ceq 'active') {
+                            $extraHeaders += 'X-MCP-Pause-Forward: active'
+                        }
+                    } else {
+                        $responseBody = $requestBody
+                    }
                 }
                 '/test-cookie' {
                     $responseBody = 'Dedicated test cookie recorded by local server'

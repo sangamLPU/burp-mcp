@@ -12,7 +12,7 @@ import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
-import io.modelcontextprotocol.kotlin.sdk.server.mcpStreamableHttp
+import io.modelcontextprotocol.kotlin.sdk.server.mcpStatelessStreamableHttp
 import net.portswigger.mcp.config.McpConfig
 import net.portswigger.mcp.security.ActivityLog
 import net.portswigger.mcp.tools.registerBurpApiTools
@@ -124,7 +124,10 @@ class KtorServerManager(private val api: MontoyaApi, private val live: LiveInter
                         call.response.header("Content-Security-Policy", "default-src 'none'")
                     }
 
-                    mcpStreamableHttp(path = "/mcp") {
+                    // This server exposes only tools and has no server-initiated notifications or resumable
+                    // event streams. Use the SDK's POST-only transport so closing a client session cannot
+                    // leave the stateful transport's standalone GET/SSE call alive in the Netty engine.
+                    mcpStatelessStreamableHttp(path = "/mcp") {
                         mcpServer
                     }
                 }.apply {

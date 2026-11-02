@@ -1,5 +1,13 @@
 # Complete Burp MCP Validation
 
+Final sign-off: [v1.4.0 .13 release readiness](FINAL_RELEASE_READINESS_v1.4.0.md): final one-shot Phase 4A PASS; complete final regression PASS (217 JVM and 91 Python tests plus PowerShell/local checks). The existing .13 JAR remains unchanged. Release is ready for the verified HTTP feature scope with documented limitations.
+
+Latest Phase 4 results: [4A INCONCLUSIVE; 4B, 4C and 4D LIVE_PROXY PASS](PHASE_4_LIVE_RESULTS_2026_11_02.md), with actual client/origin evidence and 13 targeted coordinator regressions. The nine-exchange continuous rule-engine milestone remains preserved.
+
+Reliability follow-up: [preserved milestone, bounded MCP stability, safe tool audit and prepared Phases 4A–4D](RELIABILITY_FOLLOWUP_2026_11_02.md).
+
+Latest live verification: [2026-11-02 continuous rule engine LIVE_PROXY results](LIVE_RULE_ENGINE_2026_11_02.md): nine complete exchanges passed, including sequential modifications, compatible rules, pause/resume, counters and session expiry. The earlier [connection and stateless transport check](CONNECTION_CHECK_2026_11_02.md) verified build .13, 86 tools and enforced authentication, with 217 JVM and 56 Python tests passing. The live run required only 14 targeted coordinator regressions; the full suite was not repeated.
+
 **Date:** 2026-11-01
 **Repository:** D:\Projects\MCP
 **Branch/base:** main / 57cf38165bb2e3e1f26f3867b2d4a9c2f21beeb8 before this validation cycle

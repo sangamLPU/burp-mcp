@@ -260,10 +260,10 @@ class McpClient:
             "Authorization": "Bearer " + token,
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": self._protocol_version,
         }
         if self._session_id:
             headers["Mcp-Session-Id"] = self._session_id
-            headers["MCP-Protocol-Version"] = self._protocol_version
 
         connection = None
         try:

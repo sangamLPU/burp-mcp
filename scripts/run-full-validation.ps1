@@ -2,6 +2,7 @@ param(
     [ValidateSet('OFFLINE', 'LOCAL', 'SUPERVISED')]
     [string]$Mode = 'OFFLINE',
     [switch]$BuildCandidate,
+    [switch]$ForceTestExecution,
     [ValidateRange(60, 7200)]
     [int]$OverallTimeoutSeconds = 1800,
     [ValidateRange(30, 1800)]
@@ -113,11 +114,13 @@ function Get-GradleValidationArguments {
     param(
         [Parameter(Mandatory = $true)] [ValidateSet('OFFLINE', 'LOCAL', 'SUPERVISED')] [string]$ValidationMode,
         [Parameter(Mandatory = $true)] [ValidateSet(17, 18)] [int]$ToolchainVersion,
-        [switch]$BuildCandidate
+        [switch]$BuildCandidate,
+        [switch]$ForceTestExecution
     )
 
     $validationSetting = if ($ValidationMode -eq 'OFFLINE') { 'offline' } else { 'all' }
     $arguments = "test --offline --no-daemon --console=plain -Pvalidation.mode=$validationSetting -Pjava.toolchain.version=$ToolchainVersion"
+    if ($ForceTestExecution) { $arguments = "test --rerun --offline --no-daemon --console=plain -Pvalidation.mode=$validationSetting -Pjava.toolchain.version=$ToolchainVersion" }
     if (-not $BuildCandidate) { $arguments += ' -x shadowJar' }
     return $arguments
 }
@@ -244,7 +247,7 @@ try {
     }
 
     if ($null -ne $toolchainVersion) {
-        $gradleArgs = Get-GradleValidationArguments -ValidationMode $Mode -ToolchainVersion $toolchainVersion -BuildCandidate:$BuildCandidate
+        $gradleArgs = Get-GradleValidationArguments -ValidationMode $Mode -ToolchainVersion $toolchainVersion -BuildCandidate:$BuildCandidate -ForceTestExecution:$ForceTestExecution
         $gradleLabel = if ($BuildCandidate) { 'Gradle tests and candidate packaging' } else { 'Gradle tests without JAR packaging' }
         $gradleSucceeded = Invoke-BoundedCommand $gradleLabel @("call `"$repoRoot\gradlew.bat`" $gradleArgs") $PerTestTimeoutSeconds
     } else {
@@ -265,13 +268,8 @@ try {
         $concurrentSucceeded = $false
     }
 
-    $pythonAuthTests = Join-Path $repoRoot 'scripts\test_cancel_preflight_auth.py'
-    $pythonPreflightTests = Join-Path $repoRoot 'scripts\test_cancel_test_preflight.py'
-    $authSucceeded = Invoke-BoundedCommand 'Authenticated preflight transport offline regressions' @(
-        "python.exe -B `"$pythonAuthTests`""
-    ) 60
-    $preflightSucceeded = Invoke-BoundedCommand 'Cancellation preflight policy offline regressions' @(
-        "python.exe -B `"$pythonPreflightTests`""
+    $pythonSuiteSucceeded = Invoke-BoundedCommand 'All Python offline regressions including final cancellation evidence' @(
+        "python.exe -B -m unittest discover -s `"$PSScriptRoot`" -p test_*.py"
     ) 60
     $powershellAuthTest = Join-Path $repoRoot 'scripts\test-cancel-preflight-auth.ps1'
     $powershellAuthSucceeded = Invoke-BoundedCommand 'PowerShell child environment inheritance' @(
@@ -304,10 +302,16 @@ try {
             "`"$powershellExe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$fixtureCoordinatorHarness`""
         ) 60
         $localSucceeded = $localSucceeded -and $identitySucceeded -and $fixtureCoordinatorSucceeded
+        $ruleFixtureHarness = Join-Path $repoRoot 'scripts\test-live-rule-engine-fixture.ps1'
+        $ruleFixtureSucceeded = Invoke-BoundedCommand 'Request response rule fixture loopback tests' @(
+            "`"$powershellExe`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ruleFixtureHarness`""
+        ) 60
+        $localSucceeded = $localSucceeded -and $ruleFixtureSucceeded
     } else {
         Add-Result 'Bounded localhost server tests' 'BLOCKED' 'OFFLINE mode performs no network requests; rerun with -Mode LOCAL.'
         Add-Result 'Unattended localhost identity enforcement tests' 'BLOCKED' 'OFFLINE mode performs no network requests; rerun with -Mode LOCAL.'
         Add-Result 'Identity-bound cancellation fixture coordinator tests' 'BLOCKED' 'OFFLINE mode performs no network requests; rerun with -Mode LOCAL.'
+        Add-Result 'Request response rule fixture loopback tests' 'BLOCKED' 'OFFLINE mode performs no network requests; rerun with -Mode LOCAL.'
         $localSucceeded = $false
     }
 
@@ -363,6 +367,7 @@ try {
         runId = $runId
         mode = $Mode
         candidateBuildRequested = [bool]$BuildCandidate
+        forcedTestExecution = [bool]$ForceTestExecution
         startedAtUtc = $startedAt.ToString('o')
         finishedAtUtc = $finishedAt.ToString('o')
         durationSeconds = [Math]::Round($scriptTimer.Elapsed.TotalSeconds, 2)

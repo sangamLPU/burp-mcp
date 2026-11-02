@@ -2,6 +2,7 @@ param(
     [string]$TestRunId = '',
     [string]$ServerIdentity = '',
     [switch]$IdentityFromEnvironment,
+    [switch]$RuleEngineTestMode,
     [switch]$PassThru
 )
 
@@ -59,6 +60,7 @@ $serverArguments = @(
     '-MaxRunSeconds', "$maxRunSeconds"
 )
 $serverArguments += '-IdentityFromEnvironment'
+if ($RuleEngineTestMode) { $serverArguments += '-RuleEngineTestMode' }
 $environmentNames = @('BURP_MCP_TOKEN', 'BURP_TEST_RUN_ID', 'BURP_TEST_SERVER_IDENTITY')
 $previousEnvironment = @{}
 foreach ($name in $environmentNames) {
@@ -136,6 +138,7 @@ try {
         MaxBodyBytes = $maxBodyBytes
         RequestTimeoutSeconds = $requestTimeoutSeconds
         MaxRunSeconds = $maxRunSeconds
+        RuleEngineTestMode = [bool]$RuleEngineTestMode
         HealthCheck = 'PASS; excluded from the origin observation log'
         ObservationLog = $logPath
     }

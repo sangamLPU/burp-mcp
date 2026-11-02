@@ -63,6 +63,50 @@ class LiveInterceptionTest {
         while(System.nanoTime()<deadline) { live.queue.list(kind).firstOrNull()?.let { return it };Thread.yield() }
         error("Callback failed to enter pending queue")
     }
+    private fun prepareAuthorizedJsonPost(identity: UnattendedLocalTestSnapshot, caseId: String): HttpRequest {
+        val target = "http://127.0.0.1:8000/test-post"
+        every { request.httpService().host() } returns LocalTestTargets.HOST
+        every { request.httpService().port() } returns LocalTestTargets.PORT
+        every { request.httpService().secure() } returns false
+        every { request.url() } returns target
+        every { request.method() } returns "POST"
+        every { request.path() } returns "/test-post"
+        every { request.toByteArray().length() } returns 256
+        val falseBody = "{\"enabled\":false,\"name\":\"original\",\"mcp_test\":\"after\",\"marker\":\"preserve\",\"case\":\"$caseId\",\"nested\":{\"keep\":17}}".toByteArray()
+        val trueBody = "{\"enabled\":true,\"name\":\"original\",\"mcp_test\":\"after\",\"marker\":\"preserve\",\"case\":\"$caseId\",\"nested\":{\"keep\":17}}".toByteArray()
+        val requestHeaders = listOf(
+            "Host" to "127.0.0.1:8000",
+            "Content-Type" to "application/json",
+            "Content-Length" to falseBody.size.toString(),
+            "X-MCP-Test-Run" to identity.testRunId!!,
+            "X-MCP-Server-Identity" to identity.serverIdentity!!,
+            "X-MCP-Test-ID" to caseId
+        ).map { (name, value) -> mockk<HttpHeader>().also { header ->
+            every { header.name() } returns name
+            every { header.value() } returns value
+        } }
+        every { request.headers() } returns requestHeaders
+        every { request.body().getBytes() } returns falseBody
+        every { request.body().length() } returns falseBody.size
+
+        val modifiedRequest = mockk<HttpRequest>(relaxed = true)
+        every { request.withBody(any<String>()) } returns modifiedRequest
+        every { modifiedRequest.httpService() } returns request.httpService()
+        every { modifiedRequest.url() } returns target
+        every { modifiedRequest.method() } returns "POST"
+        every { modifiedRequest.path() } returns "/test-post"
+        val modifiedLengthHeader = mockk<HttpHeader>().also {
+            every { it.name() } returns "Content-Length"
+            every { it.value() } returns trueBody.size.toString()
+        }
+        every { modifiedRequest.headers() } returns (requestHeaders.filterNot { it.name().equals("Content-Length", true) } + modifiedLengthHeader)
+        every { modifiedRequest.body().getBytes() } returns trueBody
+        every { modifiedRequest.body().length() } returns trueBody.size
+        every { modifiedRequest.toByteArray().length() } returns 256
+        every { modifiedRequest.withRemovedHeader("Content-Length") } returns modifiedRequest
+        every { modifiedRequest.withAddedHeader("Content-Length", trueBody.size.toString()) } returns modifiedRequest
+        return modifiedRequest
+    }
     @Test fun `request callback stays pending and forwards only the approved patch`() {
         val result=pool.submit<ProxyRequestReceivedAction> { requestHandler.captured.handleRequestReceived(request) }
         val t=pending("request");assertFalse(result.isDone)
@@ -406,39 +450,27 @@ class LiveInterceptionTest {
         assertTrue(pending.original.message === request)
     }
 
-    @Test fun `response rule transforms associated response independently after authorized request`() {
-        every { request.httpService().host() } returns LocalTestTargets.HOST
-        every { request.httpService().port() } returns LocalTestTargets.PORT
-        every { request.httpService().secure() } returns false
-        every { request.url() } returns LocalTestTargets.urls.first()
-        every { request.method() } returns "GET"
-        every { request.path() } returns "/test-html"
-        every { request.toByteArray().length() } returns 128
+    @Test fun `request and associated response rules modify and forward one synthetic post`() {
         config.autoApproveTargets = LocalTestTargets.ALLOWLIST_ENTRY
         live.disable("TEST_SETUP")
         live.allowEdits = true
         live.activateUnattendedLocalTestMode(60)
         val identity = live.unattendedSnapshot()
         val caseId = "rule-response-1"
-        val requestHeaders = listOf(
-            "Host" to "127.0.0.1:8000",
-            "X-MCP-Test-Run" to identity.testRunId!!,
-            "X-MCP-Server-Identity" to identity.serverIdentity!!,
-            "X-MCP-Test-ID" to caseId
-        ).map { (name, value) -> mockk<HttpHeader>().also { header -> every { header.name() } returns name; every { header.value() } returns value } }
-        every { request.headers() } returns requestHeaders
-        every { request.body().getBytes() } returns byteArrayOf()
-        every { request.body().length() } returns 0
+        val modifiedRequest = prepareAuthorizedJsonPost(identity, caseId)
         val requestRule = live.createInterceptionRule(InterceptionRuleSpec(
-            name = "Associate request for response rule", targetUrl = LocalTestTargets.urls.first(),
+            name = "Modify associated request", targetUrl = "http://127.0.0.1:8000/test-post",
             authorizationReference = identity.testRunId!!, direction = RuleDirection.REQUEST,
-            action = RuleAction.FORWARD_UNCHANGED, durationSeconds = 60
+            conditions = RuleMatchConditions(method = "POST", path = "/test-post", contentType = "application/json",
+                jsonPath = "$.enabled", jsonValueJson = "false"),
+            transformations = listOf(RuleTransformation(RuleTransformType.SET_JSON_FIELD, path = "$.enabled", valueJson = "true")),
+            durationSeconds = 60
         ))
         val responseBody = "{\"enabled\":false,\"status\":\"ok\"}".toByteArray()
         val responseHeaders = listOf(
             "Content-Type" to "application/json"
         ).map { (name, value) -> mockk<HttpHeader>().also { header -> every { header.name() } returns name; every { header.value() } returns value } }
-        every { response.initiatingRequest() } returns request
+        every { response.initiatingRequest() } returns modifiedRequest
         every { response.headers() } returns responseHeaders
         every { response.body().getBytes() } returns responseBody
         every { response.body().length() } returns responseBody.size
@@ -461,9 +493,10 @@ class LiveInterceptionTest {
         every { changedResponse.withAddedHeader("Content-Length", changedResponseBody.size.toString()) } returns changedResponse
         every { response.withBody("{\"enabled\":true,\"status\":\"ok\"}") } returns changedResponse
         val responseRule = live.createInterceptionRule(InterceptionRuleSpec(
-            name = "Modify JSON response", targetUrl = LocalTestTargets.urls.first(),
+            name = "Modify associated JSON response", targetUrl = "http://127.0.0.1:8000/test-post",
             authorizationReference = identity.testRunId!!, direction = RuleDirection.RESPONSE,
-            conditions = RuleMatchConditions(responseStatus = 200, jsonPath = "$.enabled", jsonValueJson = "false"),
+            conditions = RuleMatchConditions(method = "POST", path = "/test-post", responseStatus = 200,
+                contentType = "application/json", jsonPath = "$.enabled", jsonValueJson = "false"),
             transformations = listOf(RuleTransformation(RuleTransformType.SET_JSON_FIELD, path = "$.enabled", valueJson = "true")),
             durationSeconds = 60
         ))
@@ -472,7 +505,8 @@ class LiveInterceptionTest {
         live.enableInterceptionRule(requestRule.id)
         live.enableInterceptionRule(responseRule.id)
         val releasedRequest = pool.submit<ProxyRequestReceivedAction> { requestHandler.captured.handleRequestReceived(request) }.get(2, TimeUnit.SECONDS)
-        assertSame(request, releasedRequest.request())
+        assertSame(modifiedRequest, releasedRequest.request())
+        assertTrue(String(modifiedRequest.body().getBytes()).contains("\"enabled\":true"))
         val releasedResponse = pool.submit<ProxyResponseReceivedAction> { responseHandler.captured.handleResponseReceived(response) }.get(2, TimeUnit.SECONDS)
         assertSame(changedResponse, releasedResponse.response())
         assertTrue(live.queue.list("request").isEmpty())
@@ -480,6 +514,69 @@ class LiveInterceptionTest {
         assertEquals(1, live.ruleEngine.get(responseRule.id).stats.matchedResponses)
         assertEquals(1, live.ruleEngine.get(responseRule.id).stats.modified)
         assertEquals(1, live.ruleEngine.get(responseRule.id).stats.forwarded)
+        assertEquals(1, live.ruleEngine.get(requestRule.id).stats.matchedRequests)
+        assertEquals(1, live.ruleEngine.get(requestRule.id).stats.modified)
+        assertEquals(1, live.ruleEngine.get(requestRule.id).stats.forwarded)
+    }
+
+    @Test fun `modified request with disabled response rule is explicitly left waiting for approval`() {
+        config.autoApproveTargets = LocalTestTargets.ALLOWLIST_ENTRY
+        live.disable("TEST_SETUP")
+        live.allowEdits = true
+        live.activateUnattendedLocalTestMode(60)
+        val identity = live.unattendedSnapshot()
+        val caseId = "rule-response-disabled-1"
+        val modifiedRequest = prepareAuthorizedJsonPost(identity, caseId)
+        val requestRule = live.createInterceptionRule(InterceptionRuleSpec(
+            name = "Modify request while response rule is disabled", targetUrl = "http://127.0.0.1:8000/test-post",
+            authorizationReference = identity.testRunId!!, direction = RuleDirection.REQUEST,
+            conditions = RuleMatchConditions(method = "POST", path = "/test-post", contentType = "application/json",
+                jsonPath = "$.enabled", jsonValueJson = "false"),
+            transformations = listOf(RuleTransformation(RuleTransformType.SET_JSON_FIELD, path = "$.enabled", valueJson = "true")),
+            durationSeconds = 60
+        ))
+        val responseRule = live.createInterceptionRule(InterceptionRuleSpec(
+            name = "Disabled response rule regression", targetUrl = "http://127.0.0.1:8000/test-post",
+            authorizationReference = identity.testRunId!!, direction = RuleDirection.RESPONSE,
+            conditions = RuleMatchConditions(method = "POST", path = "/test-post", responseStatus = 200,
+                contentType = "application/json", jsonPath = "$.enabled", jsonValueJson = "false"),
+            transformations = listOf(RuleTransformation(RuleTransformType.SET_JSON_FIELD, path = "$.enabled", valueJson = "true")),
+            durationSeconds = 60
+        ))
+        val responseBody = "{\"enabled\":false,\"status\":\"ok\"}".toByteArray()
+        val responseHeaders = listOf("Content-Type" to "application/json").map { (name, value) ->
+            mockk<HttpHeader>().also { header -> every { header.name() } returns name; every { header.value() } returns value }
+        }
+        every { response.initiatingRequest() } returns modifiedRequest
+        every { response.headers() } returns responseHeaders
+        every { response.body().getBytes() } returns responseBody
+        every { response.body().length() } returns responseBody.size
+        every { response.statusCode() } returns 200.toShort()
+        every { response.toByteArray().length() } returns 128
+
+        live.startApprovedSession(60)
+        live.enableInterceptionRule(requestRule.id)
+        val releasedRequest = pool.submit<ProxyRequestReceivedAction> {
+            requestHandler.captured.handleRequestReceived(request)
+        }.get(2, TimeUnit.SECONDS)
+        assertSame(modifiedRequest, releasedRequest.request())
+        assertEquals(1, live.ruleEngine.get(requestRule.id).stats.modified)
+
+        val clientResponse = pool.submit<ProxyResponseReceivedAction> {
+            responseHandler.captured.handleResponseReceived(response)
+        }
+        val pendingResponse = pending("response")
+        assertFalse(clientResponse.isDone)
+        assertEquals(responseRule.id, live.ruleEngine.get(responseRule.id).id)
+        assertEquals(InterceptionRuleState.DISABLED, live.ruleEngine.get(responseRule.id).state)
+        assertEquals(0, live.ruleEngine.get(responseRule.id).stats.matchedResponses)
+        assertEquals(0, live.ruleEngine.get(responseRule.id).stats.modified)
+        assertTrue(pendingResponse.original.message === response)
+        assertEquals(1, live.health().pendingResponses)
+
+        live.disable("TEST_CLEANUP")
+        assertSame(responseDropped, clientResponse.get(2, TimeUnit.SECONDS))
+        assertEquals(0, live.health().pendingResponses)
     }
 
     @Test fun `disclosure request returns immediately and keeps the same ID until local approval`() = runBlocking {

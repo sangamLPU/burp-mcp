@@ -112,7 +112,7 @@ class McpServerIntegrationTest {
                 client.close()
             }
         }
-        serverManager.stop {}
+        serverManager.shutdown()
         live.close()
     }
 
@@ -279,6 +279,64 @@ class McpServerIntegrationTest {
     }
 
     @Test
+    fun `stateless transport rejects SSE and completes repeated MCP clients`() = runBlocking {
+        val probe = HttpClient()
+        try {
+            val get = withTimeout(2_000) {
+                probe.get("http://127.0.0.1:$testPort/mcp") {
+                    headers.append(io.ktor.http.HttpHeaders.Authorization, "Bearer ${config.bearerToken}")
+                    headers.append(io.ktor.http.HttpHeaders.Accept, "text/event-stream")
+                }
+            }
+            assertEquals(HttpStatusCode.MethodNotAllowed, get.status)
+            assertEquals("POST", get.headers[io.ktor.http.HttpHeaders.Allow])
+        } finally {
+            probe.close()
+        }
+
+        repeat(10) { index ->
+            val sessionClient = TestStreamableHttpMcpClient()
+            try {
+                withTimeout(5_000) {
+                    sessionClient.connectToServer("http://127.0.0.1:${testPort}/mcp", config.bearerToken)
+                    val status = sessionClient.callTool("burp_get_status", mapOf("includeDiagnostics" to false))
+                    assertReportedBuildIdentity(status, "burp_get_status after session $index")
+                }
+            } finally {
+                withTimeout(5_000) { sessionClient.close() }
+            }
+        }
+    }
+
+    @Test
+    fun `stateless listener restarts on the same port after client churn`() = runBlocking {
+        repeat(3) {
+            val stopped = CompletableDeferred<Unit>()
+            serverManager.stop { state ->
+                if (state is ServerState.Stopped) stopped.complete(Unit)
+                if (state is ServerState.Failed) stopped.completeExceptionally(state.exception)
+            }
+            withTimeout(10_000) { stopped.await() }
+            val started = CompletableDeferred<Unit>()
+            serverManager.start(config) { state ->
+                if (state is ServerState.Running) started.complete(Unit)
+                if (state is ServerState.Failed) started.completeExceptionally(state.exception)
+            }
+            withTimeout(10_000) { started.await() }
+            val freshClient = TestStreamableHttpMcpClient()
+            try {
+                withTimeout(5_000) {
+                    freshClient.connectToServer("http://127.0.0.1:$testPort/mcp", config.bearerToken)
+                    freshClient.ping()
+                    assertReportedBuildIdentity(freshClient.callTool("burp_get_status", emptyMap()), "restarted server")
+                }
+            } finally {
+                withTimeout(5_000) { freshClient.close() }
+            }
+        }
+    }
+
+    @Test
     fun `one pending approval serializes a second and does not stall MCP health calls`() = runBlocking {
         every { persistedObject.getBoolean("readOnlyMode") } returns false
         config.readOnlyMode = false
@@ -307,13 +365,14 @@ class McpServerIntegrationTest {
         )!!
 
         mockkObject(net.portswigger.mcp.config.Dialogs)
+        val releaseApproval = CompletableDeferred<Unit>()
         try {
             val promptStarted = CompletableDeferred<Unit>()
             coEvery {
                 net.portswigger.mcp.config.Dialogs.requestOption(any(), any(), any(), any(), any(), any())
             } coAnswers {
                 promptStarted.complete(Unit)
-                delay(400)
+                releaseApproval.await()
                 0
             }
 
@@ -343,20 +402,39 @@ class McpServerIntegrationTest {
             }
             assertTrue(simultaneousApproval!!.isError == true, "A second concurrent local review must fail closed without opening another prompt")
 
-            val statuses = coroutineScope {
-                (1..8).map {
-                    async {
-                        withTimeout(1_500) {
-                            client.callTool("burp_get_status", mapOf("includeDiagnostics" to false))
+            val healthClients = (1..8).map { TestStreamableHttpMcpClient() }
+            val statuses = try {
+                coroutineScope {
+                    healthClients.mapIndexed { index, healthClient ->
+                        async {
+                            withTimeout(3_000) {
+                                healthClient.connectToServer(
+                                    "http://127.0.0.1:${testPort}/mcp",
+                                    config.bearerToken
+                                )
+                                val status = healthClient.callTool(
+                                    "burp_get_status",
+                                    mapOf("includeDiagnostics" to false)
+                                )
+                                assertReportedBuildIdentity(status, "concurrent client $index")
+                                status
+                            }
                         }
-                    }
-                }.awaitAll()
+                    }.awaitAll()
+                }
+            } finally {
+                healthClients.forEach { healthClient ->
+                    if (healthClient.isConnected()) withTimeout(3_000) { healthClient.close() }
+                }
             }
             assertEquals(8, statuses.size)
             statuses.forEach { assertReportedBuildIdentity(it, "burp_get_status") }
+            assertFalse(approval.isCompleted, "Health calls must complete while the approval prompt is still pending")
+            releaseApproval.complete(Unit)
             assertFalse(approval.await()!!.isError == true)
             assertEquals(0, live.queue.get(ticket.id).approvedRevision)
         } finally {
+            releaseApproval.complete(Unit)
             unmockkObject(net.portswigger.mcp.config.Dialogs)
         }
     }

@@ -41,4 +41,9 @@ if ($scriptText -notmatch '\[switch\]\$BuildCandidate' -or
     throw 'JAR backup and candidate copy must both be guarded by the explicit BuildCandidate switch.'
 }
 
-Write-Host 'PASS: 5 validation-orchestrator assertions; default tests preserve the existing JAR, and packaging requires explicit opt-in.'
+$forcedPlan = Get-GradleValidationArguments -ValidationMode LOCAL -ToolchainVersion 17 -ForceTestExecution
+if ($forcedPlan -notmatch '^test --rerun ' -or $forcedPlan -notmatch ' -x shadowJar$') {
+    throw 'Forced final regression must execute the test task while preserving the packaged JAR.'
+}
+
+Write-Host 'PASS: 6 validation-orchestrator assertions; forced final tests execute without packaging the existing JAR.'
