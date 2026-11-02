@@ -703,4 +703,41 @@ class LiveInterceptionTest {
             assertSame(requestDropped,callback.get(2,TimeUnit.SECONDS))
         } finally { unmockkObject(Dialogs) }
     }
+
+    @Test fun `target preparation uses human approval exact allowlist and emergency revocation`() = runBlocking<Unit> {
+        live.disable("PREPARE_TARGET")
+        val url = "http://localhost:8000/lab"
+        mockkObject(Dialogs)
+        try {
+            coEvery { Dialogs.requestOption(any(), any(), any(), any(), any(), any()) } returns 1
+            assertThrows(IllegalStateException::class.java) { runBlocking { live.requestTargetRuleAuthorization(listOf(url), 30) } }
+            assertTrue(live.targetRuleAuthorizationStatus().isEmpty())
+            coEvery { Dialogs.requestOption(any(), any(), any(), any(), any(), any()) } returns 0
+            val grant = live.requestTargetRuleAuthorization(listOf(url), 30)
+            val spec = InterceptionRuleSpec("Prepared local lab", url, grant.id, RuleDirection.REQUEST, action = RuleAction.FORWARD_UNCHANGED)
+            val rule = live.createInterceptionRule(spec)
+            assertEquals(InterceptionRuleState.DISABLED, rule.state)
+            assertFalse(live.enabled)
+            assertThrows(IllegalStateException::class.java) { live.enableInterceptionRule(rule.id) }
+            live.emergencyStopUnattendedLocalTestMode()
+            assertTrue(live.targetRuleAuthorizationStatus().isEmpty())
+            assertEquals(InterceptionRuleState.EMERGENCY_STOPPED, live.ruleEngine.get(rule.id).state)
+            assertTrue(live.ruleEngine.status().emergencyStopped)
+            assertThrows(IllegalArgumentException::class.java) { live.createInterceptionRule(spec) }
+            coVerify(exactly = 2) { Dialogs.requestOption(any(), any(), any(), any(), any(), any()) }
+        } finally { unmockkObject(Dialogs) }
+    }
+
+    @Test fun `target preparation refuses wildcard allowlist missing scope and read only before approval`() = runBlocking<Unit> {
+        live.disable("PREPARE_TARGET")
+        val url = "https://fixture.example:443/lab"
+        config.autoApproveTargets = "*.example"
+        assertThrows(IllegalStateException::class.java) { runBlocking { live.requestTargetRuleAuthorization(listOf(url), 30) } }
+        config.autoApproveTargets = "fixture.example:443"
+        every { api.scope().isInScope(url) } returns false
+        assertThrows(IllegalStateException::class.java) { runBlocking { live.requestTargetRuleAuthorization(listOf(url), 30) } }
+        every { api.scope().isInScope(url) } returns true
+        config.readOnlyMode = true
+        assertThrows(IllegalStateException::class.java) { runBlocking { live.requestTargetRuleAuthorization(listOf(url), 30) } }
+    }
 }

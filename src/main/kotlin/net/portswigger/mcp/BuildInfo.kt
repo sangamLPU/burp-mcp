@@ -4,9 +4,9 @@ import java.util.jar.Manifest
 
 /** Build identity compiled into the extension and exposed through existing MCP status tools. */
 internal object BuildInfo {
-    const val version: String = "1.4.0"
-    const val buildId: String = "20261101.13-burp2024.1.1.1"
-    const val serverVersion: String = "1.4.0+20261101.13-burp2024.1.1.1"
+    const val version: String = "1.5.0-dev.1"
+    const val buildId: String = "20261102.1-target-authorization-dev"
+    const val serverVersion: String = "1.5.0-dev.1+20261102.1-target-authorization-dev"
 
     /** Checks packaging metadata without using it as the runtime source of identity. */
     fun matchesManifest(manifest: Manifest?): Boolean {

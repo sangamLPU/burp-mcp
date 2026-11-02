@@ -163,7 +163,8 @@ internal data class RuleEvaluation(
 /** In-memory, bounded evaluator. Network authorization remains exclusively in LiveInterception. */
 internal class InterceptionRuleEngine(
     private val nanoTime: () -> Long = System::nanoTime,
-    private val currentTimeMillis: () -> Long = System::currentTimeMillis
+    private val currentTimeMillis: () -> Long = System::currentTimeMillis,
+    private val approvedPreparationTarget: (InterceptionRuleSpec) -> Boolean = { false }
 ) {
     companion object {
         const val MAX_RULES = 64
@@ -243,6 +244,7 @@ internal class InterceptionRuleEngine(
         check(!emergencyStopped) { "Rule engine is emergency-stopped; activate fresh local authorization in Burp first" }
         require(effectiveDurationMillis in 1..TimeUnit.SECONDS.toMillis(MAX_TTL_SECONDS.toLong())) { "Rule duration is outside the bounded limit" }
         val rule = rules[id] ?: error("Unknown interception rule")
+        check(rule.spec.targetUrl in LocalTestTargets.urls || rule.spec.targetUrl == LocalTestTargets.RULE_AUTHORITY_URL) { "Target-specific rule execution is not implemented in this milestone" }
         check(rule.state != InterceptionRuleState.ACTIVE) { "Rule is already active" }
         check(rule.matchBudgetConsumed < rule.spec.maximumMatches) { "Rule reached its maximum match count" }
         check(rule.spec.action != RuleAction.MODIFY_AND_FORWARD || rule.modificationBudgetConsumed < rule.spec.maximumModifications) { "Rule reached its maximum modification count" }
@@ -570,6 +572,12 @@ internal class InterceptionRuleEngine(
         r.expiresAtEpochMillis,r.lastExecutionEpochMillis,r.lastErrorCode)
     private fun expireDueLocked() = rules.values.forEach(::expireRuleIfDue)
     private fun expireRuleIfDue(rule: MutableRule) {
+        if (rule.spec.targetUrl !in LocalTestTargets.urls && rule.spec.targetUrl != LocalTestTargets.RULE_AUTHORITY_URL &&
+            !approvedPreparationTarget(rule.spec) && rule.state !in setOf(InterceptionRuleState.AUTHORIZATION_ENDED, InterceptionRuleState.EMERGENCY_STOPPED)) {
+            invalidateReservationsFor(rule.id, "TARGET_AUTHORIZATION_ENDED")
+            rule.generation++; rule.state = InterceptionRuleState.AUTHORIZATION_ENDED
+            rule.deadlineNanos = null; rule.expiresAtEpochMillis = null
+        }
         val deadline = rule.deadlineNanos ?: return
         if (nanoTime() < deadline) return
         invalidateReservationsFor(rule.id, "RULE_EXPIRED")
@@ -625,10 +633,10 @@ internal class InterceptionRuleEngine(
 
     private fun validateRuleSpec(s: InterceptionRuleSpec) {
         require(s.name.length in 1..80 && s.name.none { it.isISOControl() }) { "Rule name must be 1–80 printable characters" }
-        val exactTarget = s.targetUrl in LocalTestTargets.urls
+        val exactTarget = s.targetUrl in LocalTestTargets.urls || approvedPreparationTarget(s)
         val authorityTarget = s.targetUrl == LocalTestTargets.RULE_AUTHORITY_URL
-        require(exactTarget || authorityTarget) { "Rule target must be one approved localhost test URL or the fixed local authority" }
-        require(s.authorizationReference.matches(Regex("^[a-f0-9-]{36}$"))) { "Authorization reference must be a synthetic test-run ID" }
+        require(exactTarget || authorityTarget) { "Rule target requires current exact-path human authorization" }
+        require(s.authorizationReference.matches(Regex("^[a-f0-9-]{36}$"))) { "Authorization reference must be a test-run or target-grant ID" }
         require(s.priority in -1_000..1_000) { "Priority must be between -1000 and 1000" }
         require(s.maximumMatches in 1..MAX_MATCHES) { "Maximum matches must be 1..$MAX_MATCHES" }
         require(s.maximumModifications in 0..MAX_MODIFICATIONS) { "Maximum modifications must be 0..$MAX_MODIFICATIONS" }

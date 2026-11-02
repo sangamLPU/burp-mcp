@@ -24,7 +24,7 @@ fun Server.registerInterceptionRuleTools(live: LiveInterception) {
     }
 
     mcpTool<BurpCreateInterceptionRule>(
-        "Creates a disabled, in-memory rule for one exact predefined localhost test URL. Supports separate bounded maximum match and actual modification counts. Requires bearer-authenticated write mode, the human-activated local test run identity, and empty queues before the session starts. Rule creation never enables automatic processing."
+        "Creates a disabled, in-memory rule for a predefined localhost test URL or a currently human-approved exact preparation target. External activation remains unavailable in this milestone. Supports separate bounded maximum match and actual modification counts. Requires bearer-authenticated write mode, empty queues, and either a human-activated localhost test identity or an exact-path preparation grant. Rule creation never enables automatic processing."
     ) { Json.encodeToString(safeRuleOperation { live.createInterceptionRule(spec) }) }
 
     mcpTool<BurpListInterceptionRules>("Lists configured in-memory interception rules in priority order, including state, expiry and counters; never returns message bodies or identity secrets.") {
@@ -104,7 +104,7 @@ fun Server.registerInterceptionRuleTools(live: LiveInterception) {
 
 private fun safeRuleMessage(error: Exception): String = when (error) {
     is RuleAuthorizationRequired -> error.code
-    is IllegalArgumentException -> "Check the exact localhost target, required fields, transform type and configured bounds."
+    is IllegalArgumentException -> "Check the exact authorized target, required fields, transform type and configured bounds."
     is IllegalStateException -> when {
         error.message?.contains("Unknown interception rule", true) == true -> "The requested rule ID is not configured."
         error.message?.contains("already active", true) == true -> "The rule is already active."

@@ -50,3 +50,6 @@ build/
 *.pem
 *.key
 __pycache__/
+
+# Kotlin compiler local state
+.kotlin/

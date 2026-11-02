@@ -13,6 +13,11 @@ group = providers.gradleProperty("group").get()
 version = providers.gradleProperty("version").get()
 description = providers.gradleProperty("description").get()
 
+// Keep development outputs separate from the preserved v1.4.0 release artifacts.
+if (providers.gradleProperty("developmentBuild").orNull == "true") {
+    layout.buildDirectory.set(layout.projectDirectory.dir("build/dev-v1.5.0"))
+}
+
 dependencies {
     compileOnly(libs.burp.montoya.api)
 

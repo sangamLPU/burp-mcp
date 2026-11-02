@@ -32,6 +32,13 @@ internal fun requestMetadata(request: HttpRequest): SafeRequestMetadata {
 }
 
 fun Server.registerInterceptionTools(live: LiveInterception, api: MontoyaApi) {
+    mcpTool<BurpRequestTargetRuleAuthorization>("Requests explicit human approval for preparing disabled rules for 1..16 exact paths on one HTTP(S) host and port for up to 300 seconds. Requires existing Burp scope and exact host:port allowlist; never enables interception or execution.") {
+        Json.encodeToString(live.requestTargetRuleAuthorization(urls, durationSeconds))
+    }
+    mcpTool<BurpListTargetRuleAuthorizations>("Lists current in-memory target preparation grants. Expired or revoked permissions are removed; never renews approval.") {
+        Json.encodeToString(live.targetRuleAuthorizationStatus())
+    }
+
     fun read(id: String, kind: String): DecisionQueue.Ticket<HeldMessage> = try { live.snapshot(id,kind) }
         catch(e:IllegalStateException) { throw McpToolError(e.message?.take(256) ?: "Interception message unavailable") }
     fun status(): String {
@@ -270,3 +277,6 @@ internal fun redactedDiff(original: String, proposed: String): String {
 @Serializable data class BurpCancelInterceptions(val includeDiagnostics:Boolean=true)
 @Serializable data class BurpRequestInterceptDisclosure(val id:String,val kind:String,val revision:Int)
 @Serializable data class BurpSetProxyInterceptState(val enabled:Boolean)
+
+@Serializable data class BurpRequestTargetRuleAuthorization(val urls: List<String>, val durationSeconds: Int = 120)
+@Serializable data class BurpListTargetRuleAuthorizations(val includeDiagnostics: Boolean = false)

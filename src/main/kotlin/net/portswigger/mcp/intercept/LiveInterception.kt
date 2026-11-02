@@ -64,7 +64,24 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
     }
 
     val queue = DecisionQueue<HeldMessage>()
-    internal val ruleEngine = InterceptionRuleEngine()
+    internal val targetRuleAuthorizations = TargetRuleAuthorization(::targetPreparationEligible)
+    internal val ruleEngine = InterceptionRuleEngine(approvedPreparationTarget = targetRuleAuthorizations::permits)
+
+    private fun targetPreparationEligible(url: String): Boolean = runCatching {
+        val uri = URI(url)
+        !closed && !enabled && config.requireBearerToken && !config.readOnlyMode &&
+            config.getAutoApproveTargetsList().any { it.equals("${uri.host}:${uri.port}", ignoreCase = true) } &&
+            api.scope().isInScope(url)
+    }.getOrDefault(false)
+
+    suspend fun requestTargetRuleAuthorization(urls: List<String>, seconds: Int): TargetRuleGrant {
+        check(!enabled) { "Stop interception before requesting target authorization" }
+        return targetRuleAuthorizations.request(urls, seconds) { details ->
+            StateChangeSecurity.confirm(api, config, "Authorize exact rule preparation target", details)
+        }
+    }
+
+    fun targetRuleAuthorizationStatus(): List<TargetRuleGrant> = targetRuleAuthorizations.list()
     @Volatile var enabled = false; private set
     @Volatile var allowEdits = false
     @Volatile var timeoutSeconds = config.interceptionTimeoutSeconds; private set
@@ -232,6 +249,7 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
     }
 
     private fun endSession(reason: String) {
+        targetRuleAuthorizations.revokeAll()
         val wasActive = enabled
         enabled = false
         heartbeatHealth = when (reason) {
@@ -545,6 +563,10 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         checkRuleBearerAndMode(spec)
         check(!enabled) { "Create or edit rules before starting the bounded interception session" }
         require(queue.list("request").isEmpty() && queue.list("response").isEmpty()) { "Both interception queues must be empty" }
+        if (spec.targetUrl !in LocalTestTargets.urls && spec.targetUrl != LocalTestTargets.RULE_AUTHORITY_URL) {
+            check(targetRuleAuthorizations.permits(spec)) { "Target authorization expired or changed" }
+            return ruleEngine.create(spec)
+        }
         val decision = unattendedManagementDecision(LocalTestManagementOperation.CONFIGURE_RULE)
         check(decision.decision == LocalTestPolicyDecision.AUTO_APPROVE) { "Rule configuration is not authorized: ${decision.reason}" }
         return ruleEngine.create(spec)
@@ -555,6 +577,10 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         check(!enabled) { "Rule configuration is allowed only before the session starts" }
         require(queue.list("request").isEmpty() && queue.list("response").isEmpty()) { "Both interception queues must be empty" }
         check(ruleEngine.get(id).state != InterceptionRuleState.ACTIVE) { "Pause a rule before updating it" }
+        if (spec.targetUrl !in LocalTestTargets.urls && spec.targetUrl != LocalTestTargets.RULE_AUTHORITY_URL) {
+            check(targetRuleAuthorizations.permits(spec)) { "Target authorization expired or changed" }
+            return ruleEngine.update(id, spec)
+        }
         val decision = unattendedManagementDecision(LocalTestManagementOperation.CONFIGURE_RULE)
         check(decision.decision == LocalTestPolicyDecision.AUTO_APPROVE) { "Rule configuration is not authorized: ${decision.reason}" }
         return ruleEngine.update(id, spec)
@@ -564,6 +590,7 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
         check(config.requireBearerToken && !config.readOnlyMode) { "Authenticated write access is required to enable a rule" }
         expireUnattendedModeLocked()
         val rule = ruleEngine.get(id)
+        check(rule.spec.targetUrl in LocalTestTargets.urls || rule.spec.targetUrl == LocalTestTargets.RULE_AUTHORITY_URL) { "Target-specific rule execution is not implemented in this milestone" }
         val mode = unattendedMode.snapshot()
         check(mode.active && mode.testRunId == rule.spec.authorizationReference) { "Rule authorization reference does not match the active test run" }
         ruleEngine.validateForAuthorization(rule.spec)
@@ -598,6 +625,10 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig) : Aut
     private fun checkRuleBearerAndMode(spec: InterceptionRuleSpec) {
         check(config.requireBearerToken && !config.readOnlyMode) { "Authenticated write access with read-only mode disabled is required" }
         ruleEngine.validateForAuthorization(spec)
+        if (spec.targetUrl !in LocalTestTargets.urls && spec.targetUrl != LocalTestTargets.RULE_AUTHORITY_URL) {
+            check(targetRuleAuthorizations.permits(spec)) { "Target authorization missing or expired" }
+            return
+        }
         val mode = unattendedMode.snapshot()
         check(mode.active && mode.testRunId == spec.authorizationReference) { "Rule must reference the currently active synthetic test run" }
     }
