@@ -144,11 +144,51 @@ class LiveRuleCoordinatorRegressionTests(unittest.TestCase):
         self.assertEqual(state, "WAITING_FOR_APPROVAL")
         self.assertIn("manual approval", reason)
 
+    def test_native_intercept_response_contract_fails_closed(self):
+        from unittest.mock import Mock
+        acknowledgement = {"content": [{"type": "text", "text": "Native Proxy interception updated."}], "isError": False}
+        client = Mock()
+        client.rpc.return_value = acknowledgement
+        coordinator = LiveRuleEngineCoordinator(client)
+        self.assertEqual(coordinator.tool("burp_set_proxy_intercept_state", enabled=False), {"confirmed": True})
+        client.rpc.assert_called_once_with("tools/call", {"name": "burp_set_proxy_intercept_state", "arguments": {"enabled": False}})
+        fixtures = {
+            "tool_error": {**acknowledgement, "isError": True},
+            "unexpected_format": {"content": [{"type": "image", "data": "synthetic"}]},
+            "missing_content": {},
+            "missing_text": {"content": [{"type": "text"}]},
+            "failed_transition": {"content": [{"type": "text", "text": "State change failed."}], "isError": False},
+            "approval_required": {"content": [{"type": "text", "text": "Approval required."}], "isError": False},
+            "approval_denied": {"content": [{"type": "text", "text": "Tool failed (IllegalStateException). Check the Burp MCP activity log for details."}], "isError": True},
+            "malformed_json": {"content": [{"type": "text", "text": "{"}]},
+            "json_without_confirmation": {"content": [{"type": "text", "text": '{}'}]},
+            "conflicting_wrapper": {**acknowledgement, "structuredContent": {"enabled": True}},
+            "missing_wrapper": None,
+        }
+        for label, response in fixtures.items():
+            with self.subTest(label=label):
+                client = Mock()
+                client.rpc.return_value = response
+                client.tool.return_value = {"unattendedMode": {"remainingMillis": 120000}}
+                coordinator = LiveRuleEngineCoordinator(client)
+                with self.assertRaises(CoordinatorError) as raised:
+                    coordinator._start_session_and_enable_rules()
+                self.assertEqual(raised.exception.code, "NATIVE_INTERCEPT_NOT_CONFIRMED")
+                self.assertFalse(coordinator.native_intercept_prepared)
+                self.assertFalse(coordinator.session_started)
+                self.assertEqual(coordinator.client_attempts_started, 0)
+                self.assertEqual([call.args[0] for call in client.tool.call_args_list], ["burp_get_intercept_status"])
+
     def test_native_intercept_confirmation_happens_before_session_start(self):
         class Client:
             def __init__(self):
                 self.events = []
                 self.status_reads = 0
+
+            def rpc(self, method, params):
+                self.events.append((params["name"], params["arguments"]))
+                return {"content": [{"type": "text", "text": "Native Proxy interception updated."}],
+                        "isError": False}
 
             def tool(self, name, **args):
                 self.events.append((name, args))

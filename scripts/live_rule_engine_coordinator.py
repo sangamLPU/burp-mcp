@@ -24,7 +24,7 @@ import cancel_test_preflight as preflight
 TARGET_URL = "http://127.0.0.1:8000/test-post"
 PROXY_HOST = "127.0.0.1"
 PROXY_PORT = 8080
-EXPECTED_BUILD_ID = "20261101.13-burp2024.1.1.1"
+EXPECTED_BUILD_ID = "20261102.2-target-live-session-dev"
 SESSION_LIFETIME_SECONDS = 60
 RULE_TTL_SECONDS = 60
 SESSION_SAFETY_MARGIN_MS = 30_000
@@ -250,6 +250,16 @@ class LiveRuleEngineCoordinator:
         self.evidence_path = Path(__file__).resolve().parents[1] / "build" / "reports" / "live-rule-engine" / f"exchanges-{uuid.uuid4().hex}.jsonl"
 
     def tool(self, name: str, **args):
+        if name == "burp_set_proxy_intercept_state":
+            # This tool returns an MCP TextContent acknowledgement, not JSON.
+            # Its handler acknowledges only after local approval and the state change.
+            result = self.client.rpc("tools/call", {"name": name, "arguments": args})
+            expected = [{"type": "text", "text": "Native Proxy interception updated."}]
+            if (not isinstance(result, dict) or result.get("isError", False) is not False or
+                    result.get("content") != expected or "structuredContent" in result):
+                raise CoordinatorError("NATIVE_INTERCEPT_NOT_CONFIRMED",
+                                       "Native Proxy state change was not confirmed; no session or traffic started")
+            return {"confirmed": True}
         result = self.client.tool(name, **args)
         if name == "burp_get_interception_rule_stats" and args.get("ruleId") and isinstance(result, list):
             if len(result) != 1 or not isinstance(result[0], dict):
