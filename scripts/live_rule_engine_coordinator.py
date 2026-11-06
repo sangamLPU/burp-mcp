@@ -24,7 +24,7 @@ import cancel_test_preflight as preflight
 TARGET_URL = "http://127.0.0.1:8000/test-post"
 PROXY_HOST = "127.0.0.1"
 PROXY_PORT = 8080
-EXPECTED_BUILD_ID = "20261102.2-target-live-session-dev"
+EXPECTED_BUILD_ID = "20261106.1-connection-origin-dev"
 SESSION_LIFETIME_SECONDS = 60
 RULE_TTL_SECONDS = 60
 SESSION_SAFETY_MARGIN_MS = 30_000
