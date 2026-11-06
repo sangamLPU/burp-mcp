@@ -9,6 +9,10 @@ import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.sse.SSE
 import io.ktor.client.request.get
+import io.ktor.client.request.post
+import io.ktor.client.request.header
+import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
 import io.mockk.coEvery
 import io.mockk.every
@@ -200,6 +204,88 @@ class McpServerIntegrationTest {
         } finally {
             httpClient.close()
         }
+    }
+
+    private val initializeBody = """{"jsonrpc":"2.0","id":71,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"connection-regression","version":"1"}}}"""
+
+    private suspend fun protocolPost(
+        authorization: String? = "Bearer ${config.bearerToken}",
+        origin: String? = null,
+        userAgent: String = "codex-connection-regression",
+        host: String? = null,
+        body: String = initializeBody
+    ): Pair<HttpStatusCode, String> {
+        val http = HttpClient()
+        return try {
+            val response = http.post("http://127.0.0.1:$testPort/mcp") {
+                header("Accept", "application/json, text/event-stream")
+                header("Content-Type", "application/json")
+                header("User-Agent", userAgent)
+                authorization?.let { header("Authorization", it) }
+                origin?.let { header("Origin", it) }
+                host?.let { header("Host", it) }
+                setBody(body)
+            }
+            response.status to response.bodyAsText()
+        } finally {
+            http.close()
+        }
+    }
+
+    @Test
+    fun `connection security accepts authenticated native initialize and discovery`() = runBlocking {
+        val (status, body) = protocolPost()
+        assertEquals(HttpStatusCode.OK, status)
+        val initialized = Json.parseToJsonElement(body).jsonObject
+        assertFalse(initialized.containsKey("error"))
+        assertEquals("2025-03-26", initialized["result"]!!.jsonObject["protocolVersion"]!!.jsonPrimitive.content)
+        val (listStatus, listBody) = protocolPost(body = """{"jsonrpc":"2.0","id":72,"method":"tools/list","params":{}}""")
+        assertEquals(HttpStatusCode.OK, listStatus)
+        val listed = Json.parseToJsonElement(listBody).jsonObject
+        assertFalse(listed.containsKey("error"))
+        val tools = listed["result"]!!.jsonObject["tools"] as kotlinx.serialization.json.JsonArray
+        assertEquals(89, tools.size)
+        assertEquals(89, tools.map { it.jsonObject["name"]!!.jsonPrimitive.content }.toSet().size)
+    }
+
+    @Test
+    fun `connection security accepts approved browser origins`() = runBlocking {
+        for (origin in listOf("http://127.0.0.1:$testPort", "http://localhost:$testPort")) {
+            val (status, body) = protocolPost(origin = origin, userAgent = "Mozilla/5.0")
+            assertEquals(HttpStatusCode.OK, status, origin)
+            val initialized = Json.parseToJsonElement(body).jsonObject
+            assertTrue(initialized.containsKey("result"))
+            assertFalse(initialized.containsKey("error"))
+        }
+    }
+
+    @Test
+    fun `connection security never bypasses bearer authentication without Origin`() = runBlocking {
+        for (origin in listOf(null, "http://127.0.0.1:$testPort")) {
+            for (authorization in listOf(null, "Bearer incorrect-token", "Basic invalid", "Bearer", "Bearer ")) {
+                assertEquals(HttpStatusCode.Unauthorized, protocolPost(authorization = authorization, origin = origin).first)
+                assertEquals(HttpStatusCode.Unauthorized, protocolPost(authorization = authorization, origin = origin,
+                    body = """{"jsonrpc":"2.0","id":72,"method":"tools/list","params":{}}""").first)
+            }
+        }
+    }
+
+    @Test
+    fun `connection security retains origin host and browser restrictions`() = runBlocking {
+        assertEquals(HttpStatusCode.Forbidden, protocolPost(origin = "http://untrusted.invalid").first)
+        assertEquals(HttpStatusCode.Forbidden, protocolPost(origin = "null").first)
+        assertEquals(HttpStatusCode.Forbidden, protocolPost(host = "untrusted.invalid:$testPort").first)
+        assertEquals(HttpStatusCode.Forbidden, protocolPost(host = "127.0.0.1:${testPort + 1}").first)
+        assertEquals(HttpStatusCode.Forbidden, protocolPost(userAgent = "Mozilla/5.0").first)
+    }
+
+    @Test
+    fun `connection security does not treat malformed initialize as success`() = runBlocking {
+        val (status, body) = protocolPost(body = """{"jsonrpc":"2.0","id":71,"method":"initialize","params":{}}""")
+        val response = Json.parseToJsonElement(body).jsonObject
+        assertFalse(response.containsKey("result"), "HTTP $status must not turn a protocol error into success")
+        assertTrue(response.containsKey("error"))
+        assertEquals("-32602", response["error"]!!.jsonObject["code"]!!.jsonPrimitive.content)
     }
 
     @Test

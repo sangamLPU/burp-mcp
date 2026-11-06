@@ -100,7 +100,7 @@ class KtorServerManager(private val api: MontoyaApi, private val live: LiveInter
                             api.logging().logToOutput("Blocked DNS rebinding attack from origin: $origin")
                             call.respond(HttpStatusCode.Forbidden)
                             return@intercept
-                        } else if (isBrowserRequest(userAgent)) {
+                        } else if (origin == null && isBrowserRequest(userAgent)) {
                             api.logging().logToOutput("Blocked browser request without Origin header")
                             call.respond(HttpStatusCode.Forbidden)
                             return@intercept
