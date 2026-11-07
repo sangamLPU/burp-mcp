@@ -104,7 +104,7 @@ fun io.modelcontextprotocol.kotlin.sdk.server.Server.registerBurpApiTools(
             } else parsed.port
             val inScope = runCatching { api.scope().isInScope(url) }.getOrDefault(false)
             val allowlisted = host != null && port in 1..65535 && HttpRequestSecurity.isAllowedByHostAllowlist(host, port, config)
-            ScopeCheck(url = SafeContent.redactInlineSecrets(url), inBurpScope = inScope, hostAllowlisted = allowlisted, eligible = inScope && allowlisted)
+            ScopeCheck(url = SafeContent.redactUrl(url), inBurpScope = inScope, hostAllowlisted = allowlisted, eligible = inScope && allowlisted)
         }
         Json.encodeToString(ScopeResult(scopeRulesEnumerated = false, note = "Use Burp Target > Scope to view or edit scope rules.", checks = checks))
     }
@@ -234,7 +234,7 @@ fun io.modelcontextprotocol.kotlin.sdk.server.Server.registerBurpApiTools(
         requireHistoryAccess(config)
         val results = accessibleSiteMap(api, config).drop(offset).take(count).map { item ->
             SiteMapEntry(
-                url = SafeContent.redactInlineSecrets(item.request().url()),
+                url = SafeContent.redactUrl(item.request().url()),
                 method = item.request().method(),
                 statusCode = item.response()?.statusCode()?.toInt(),
                 request = SafeContent.render(item.request()),
@@ -346,7 +346,10 @@ fun io.modelcontextprotocol.kotlin.sdk.server.Server.registerBurpApiTools(
             throw McpToolError("Unsupported capability: Burp Scanner findings require Burp Suite Professional Edition.")
         }
         requireHistoryAccess(config)
-        val issues = api.siteMap().issues().take(100).drop(offset).take(count).map { it.toSerializableForm() }
+        val issues = api.siteMap().issues().asSequence()
+            .filter { isAuthorizedScannerIssue(it, api, config) }
+            .drop(offset).take(count)
+            .map { it.toSerializableForm { pair -> isAuthorizedRequest(pair.request(), api, config) } }.toList()
         Json.encodeToString(issues)
     }
 
@@ -364,13 +367,13 @@ fun io.modelcontextprotocol.kotlin.sdk.server.Server.registerBurpApiTools(
         val id = UUID.randomUUID().toString()
         ScanRegistry.add(id, audit)
         ActivityLog.record("burp_start_passive_scan", "started", "passive audit")
-        Json.encodeToString(ScanStatusResult(id, audit.statusMessage(), audit.requestCount(), audit.errorCount(), audit.issues().size))
+        Json.encodeToString(ScanStatusResult(id, SafeContent.markUntrusted(audit.statusMessage(), 512), audit.requestCount(), audit.errorCount(), audit.issues().size))
     }
 
     mcpTool<BurpGetScanStatus>("Returns status for a scan started by this extension instance. Scanner task discovery requires Burp Professional.") {
         requireScanner(api)
         val audit = ScanRegistry.get(scanId) ?: throw McpToolError("No active audit with this extension-generated scan ID. Scan IDs are lost when Burp unloads the extension.")
-        Json.encodeToString(ScanStatusResult(scanId, audit.statusMessage(), audit.requestCount(), audit.errorCount(), audit.issues().size))
+        Json.encodeToString(ScanStatusResult(scanId, SafeContent.markUntrusted(audit.statusMessage(), 512), audit.requestCount(), audit.errorCount(), audit.issues().size))
     }
 
     mcpTool<BurpStopScan>("Stops and deletes a passive audit created by this extension instance. Requires read-only mode off and one-time approval.") {
@@ -395,7 +398,9 @@ fun io.modelcontextprotocol.kotlin.sdk.server.Server.registerBurpApiTools(
                 SecurityAnalysis.cors(headerMap(response), item.request().headerValue("Origin"))
         }
         val scannerSupported = edition(api) == BurpSuiteEdition.PROFESSIONAL
-        val scannerIssueCount = if (scannerSupported) runCatching { api.siteMap().issues().size }.getOrDefault(0) else null
+        val scannerIssueCount = if (scannerSupported) runCatching {
+            api.siteMap().issues().count { isAuthorizedScannerIssue(it, api, config) }
+        }.getOrDefault(0) else null
         Json.encodeToString(
             SecurityReport(
                 generatedAt = Instant.now().toString(),
@@ -473,6 +478,15 @@ internal fun isAuthorizedRequest(request: HttpRequest?, api: MontoyaApi, config:
         runCatching { api.scope().isInScope(url) }.getOrDefault(false)
 }
 
+internal fun isAuthorizedScannerIssue(
+    issue: burp.api.montoya.scanner.audit.issues.AuditIssue, api: MontoyaApi, config: McpConfig
+): Boolean = runCatching {
+    val url = issue.baseUrl() ?: return@runCatching false
+    val service = issue.httpService()
+    HttpRequestSecurity.isAllowedByHostAllowlist(service.host(), service.port(), config) &&
+        urlMatchesHttpService(url, service.host(), service.port()) && api.scope().isInScope(url)
+}.getOrDefault(false)
+
 private fun accessibleSiteMap(api: MontoyaApi, config: McpConfig) =
     api.siteMap().requestResponses().filter { item ->
         val request = runCatching { item.request() }.getOrNull() ?: return@filter false
@@ -504,10 +518,10 @@ private fun historySummary(item: ProxyHttpRequestResponse, historyId: Int): Hist
     return HistoryEntry(
         historyId = historyId,
         timestamp = runCatching { item.time().toString() }.getOrDefault(""),
-        url = SafeContent.redactInlineSecrets(request.url()),
+        url = SafeContent.redactUrl(request.url()),
         method = request.method(),
         statusCode = response?.statusCode()?.toInt(),
-        contentType = response?.headerValue("Content-Type")?.take(256),
+        contentType = response?.headerValue("Content-Type")?.let { SafeContent.redactHeader("Content-Type", it) }?.take(256),
         request = SafeContent.render(request),
         response = SafeContent.render(response),
         contentTrust = SafeContent.UNTRUSTED_CONTENT_NOTICE
@@ -522,10 +536,10 @@ private fun analyzeRequest(request: HttpRequest): RequestAnalysis {
     if (request.hasHeader("Cookie")) findings += SecurityFinding("Cookie header", "observed", "directly_observed", "Cookie is present; value redacted", "Review cookie scope and session handling.")
     if (request.method() in setOf("PUT", "PATCH", "DELETE")) findings += SecurityFinding("State-changing HTTP method", "observed", "directly_observed", "A state-changing HTTP method was observed", "Verify that authorization and CSRF protections match the endpoint's intended behavior.")
     return RequestAnalysis(
-        url = SafeContent.redactInlineSecrets(request.url()),
+        url = SafeContent.redactUrl(request.url()),
         method = request.method(),
         httpVersion = request.httpVersion(),
-        contentType = request.headerValue("Content-Type"),
+        contentType = request.headerValue("Content-Type")?.let { SafeContent.redactHeader("Content-Type", it) },
         bodyBytes = bodyBytes,
         headers = headers,
         findings = findings,
@@ -541,7 +555,7 @@ private fun analyzeResponse(response: burp.api.montoya.http.message.responses.Ht
         SecurityAnalysis.cookies(response.headers().filter { it.name().equals("Set-Cookie", true) }.map { it.value() }, https)
     return ResponseAnalysis(
         statusCode = response.statusCode().toInt(),
-        contentType = response.headerValue("Content-Type"),
+        contentType = response.headerValue("Content-Type")?.let { SafeContent.redactHeader("Content-Type", it) },
         bodyBytes = response.body().length(),
         headers = headers,
         findings = findings,
@@ -596,10 +610,9 @@ private fun modifyRawRequest(
     removals: List<String>,
     replacementBody: String?
 ): String {
-    val normalized = raw.replace("\r\n", "\n")
-    val separator = normalized.indexOf("\n\n")
-    require(separator >= 0) { "rawRequest must contain a header/body separator" }
-    val lines = normalized.substring(0, separator).split('\n').toMutableList()
+    val separator = Regex("\\r?\\n\\r?\\n").find(raw)
+        ?: throw IllegalArgumentException("rawRequest must contain a header/body separator")
+    val lines = raw.substring(0, separator.range.first).replace("\r\n", "\n").split('\n').toMutableList()
     require(lines.isNotEmpty() && lines.first().matches(Regex("^[A-Z]+\\s+\\S+\\s+HTTP/[0-9.]+$"))) { "Invalid HTTP request line" }
     val removalSet = removals.map { it.lowercase() }.toSet()
     val filtered = mutableListOf(lines.first())
@@ -621,9 +634,30 @@ private fun modifyRawRequest(
     updates.forEach { (name, value) ->
         if (seenUpdates.add(name.lowercase())) filtered += "$name: $value"
     }
-    val oldBody = normalized.substring(separator + 2)
+    val oldBody = raw.substring(separator.range.last + 1)
     val body = replacementBody ?: oldBody
-    return filtered.joinToString("\r\n") + "\r\n\r\n" + body
+    if (replacementBody != null) {
+        fun headerName(line: String) = line.substringBefore(':').trim().lowercase()
+        require(filtered.drop(1).none { headerName(it) == "transfer-encoding" }) { "Body replacement with transfer encoding is unsupported" }
+        require(filtered.drop(1).count { headerName(it) == "content-length" } <= 1) { "Ambiguous Content-Length" }
+        val contentTypes = filtered.drop(1).filter { headerName(it) == "content-type" }
+        require(contentTypes.size <= 1) { "Ambiguous Content-Type" }
+        val charsets = contentTypes.singleOrNull()?.substringAfter(':')?.split(';')?.drop(1).orEmpty()
+            .map(String::trim).filter { it.substringBefore('=').trim().equals("charset", true) }
+        require(charsets.size <= 1 && charsets.all {
+            Regex("(?i)^charset\\s*=\\s*(?:utf-8|\"utf-8\"|'utf-8')\\s*$").matches(it)
+        }) { "Text body replacement requires UTF-8 charset" }
+        val encodings = filtered.drop(1).filter { headerName(it) == "content-encoding" }
+        require(encodings.size <= 1 && encodings.all { it.substringAfter(':').trim().equals("identity", true) }) {
+            "Text body replacement of compressed messages is unsupported"
+        }
+        val encodedBody = Charsets.UTF_8.newEncoder().encode(java.nio.CharBuffer.wrap(body))
+        filtered.removeAll { headerName(it) == "content-length" }
+        filtered += "Content-Length: ${encodedBody.remaining()}"
+    }
+    val result = filtered.joinToString("\r\n") + "\r\n\r\n" + body
+    require(result.toByteArray(Charsets.UTF_8).size <= SafeContent.MAX_REQUEST_BYTES) { "Proposed request exceeds the 1 MiB limit" }
+    return result
 }
 
 private object ScanRegistry {

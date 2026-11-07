@@ -31,7 +31,7 @@ fun Server.registerInterceptionRuleTools(live: LiveInterception) {
         Json.encodeToString(live.ruleEngine.list())
     }
 
-    mcpTool<BurpGetInterceptionRule>("Returns one rule configuration and its bounded lifecycle state. The authorization reference is the non-secret synthetic run ID; server identity and bearer token are not returned.") {
+    mcpTool<BurpGetInterceptionRule>("Returns one rule configuration and its bounded lifecycle state. The authorization reference is a synthetic run ID or target preparation grant ID; server identity and bearer token are not returned.") {
         Json.encodeToString(safeRuleOperation { live.ruleEngine.get(ruleId) })
     }
 

@@ -233,7 +233,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
     val toolingDisabledMessage =
         "User has disabled configuration editing. They can enable it in the MCP tab in Burp by selecting 'Enable tools that can edit your config'"
 
-    mcpTool<SetProjectOptions>("Sets project-level configuration in JSON format. This will be merged with existing configuration. Make sure to export before doing this, so you know what the schema is. Make sure the JSON has a top level 'user_options' object!") {
+    mcpTool<SetProjectOptions>("Imports project-level configuration JSON through Burp's project-options API. Export the current project configuration first and follow its actual schema. Requires configuration-editing opt-in, write mode and one-time local approval.") {
         if (config.readOnlyMode) {
             "Denied: read-only mode is enabled."
         } else if (config.configEditingTooling && StateChangeSecurity.confirm(api, config, "Edit project configuration", "Configuration payload omitted from the approval dialog and audit log.")) {
@@ -249,7 +249,7 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
     }
 
 
-    mcpTool<SetUserOptions>("Sets user-level configuration in JSON format. This will be merged with existing configuration. Make sure to export before doing this, so you know what the schema is. Make sure the JSON has a top level 'project_options' object!") {
+    mcpTool<SetUserOptions>("Imports user-level configuration JSON through Burp's user-options API. Export the current user configuration first and follow its actual schema. Requires configuration-editing opt-in, write mode and one-time local approval.") {
         if (config.readOnlyMode) {
             "Denied: read-only mode is enabled."
         } else if (config.configEditingTooling && StateChangeSecurity.confirm(api, config, "Edit user configuration", "Configuration payload omitted from the approval dialog and audit log.")) {
@@ -266,16 +266,12 @@ fun Server.registerTools(api: MontoyaApi, config: McpConfig) {
 
     if (api.burpSuite().version().edition() == BurpSuiteEdition.PROFESSIONAL) {
         mcpPaginatedTool<GetScannerIssues>("Displays information about issues identified by the scanner") {
+            if (!checkDataAccessOrDeny(DataAccessType.HTTP_HISTORY, config, api, "Scanner findings")) {
+                throw McpToolError("Project traffic access denied by Burp MCP settings or user approval.")
+            }
             api.siteMap().issues().asSequence()
-                .filter { issue ->
-                    val baseUrl = issue.baseUrl()
-                    val parsed = runCatching { java.net.URI(baseUrl) }.getOrNull()
-                    val host = parsed?.host?.removeSurrounding("[", "]")
-                    val port = parsed?.let { if (it.port > 0) it.port else if (it.scheme.equals("https", true)) 443 else 80 } ?: -1
-                    host != null && port > 0 && HttpRequestSecurity.isAllowedByHostAllowlist(host, port, config) &&
-                        runCatching { api.scope().isInScope(baseUrl) }.getOrDefault(false)
-                }
-                .map { Json.encodeToString(it.toSerializableForm()) }
+                .filter { isAuthorizedScannerIssue(it, api, config) }
+                .map { Json.encodeToString(it.toSerializableForm { pair -> isAuthorizedRequest(pair.request(), api, config) }) }
         }
 
         val collaboratorClient by lazy { api.collaborator().createClient() }

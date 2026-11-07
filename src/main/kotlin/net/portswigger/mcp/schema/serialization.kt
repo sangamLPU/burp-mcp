@@ -9,7 +9,9 @@ import kotlinx.serialization.Serializable
 import net.portswigger.mcp.compat.MontoyaRuntimeCompat
 import net.portswigger.mcp.security.SafeContent
 
-fun AuditIssue.toSerializableForm(): IssueDetails {
+fun AuditIssue.toSerializableForm(
+    includeRequestResponse: (burp.api.montoya.http.message.HttpRequestResponse) -> Boolean = { true }
+): IssueDetails {
     return IssueDetails(
         name = name()?.let { SafeContent.markUntrusted(it) },
         detail = detail()?.let { SafeContent.markUntrusted(it) },
@@ -19,10 +21,10 @@ fun AuditIssue.toSerializableForm(): IssueDetails {
             port = httpService().port(),
             secure = httpService().secure()
         ),
-        baseUrl = baseUrl()?.let { SafeContent.markUntrusted(it) },
+        baseUrl = baseUrl()?.let { SafeContent.markUntrusted(SafeContent.redactUrl(it)) },
         severity = AuditIssueSeverity.valueOf(severity().name),
         confidence = AuditIssueConfidence.valueOf(confidence().name),
-        requestResponses = requestResponses().map { it.toSerializableForm() },
+        requestResponses = requestResponses().filter(includeRequestResponse).map { it.toSerializableForm() },
         collaboratorInteractions = collaboratorInteractions().map {
             Interaction(
                 interactionId = it.id().toString(),
@@ -30,7 +32,7 @@ fun AuditIssue.toSerializableForm(): IssueDetails {
             )
         },
         definition = AuditIssueDefinition(
-            id = definition().name(),
+            id = SafeContent.markUntrusted(definition().name(), 512),
             background = definition().background()?.let { SafeContent.markUntrusted(it) },
             remediation = definition().remediation()?.let { SafeContent.markUntrusted(it) },
             typeIndex = definition().typeIndex(),

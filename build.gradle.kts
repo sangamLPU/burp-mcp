@@ -86,6 +86,9 @@ tasks {
 
     shadowJar {
         archiveClassifier.set("")
+        if (providers.gradleProperty("developmentBuild").orNull == "true") {
+            archiveFileName.set("burp-mcp-${project.version}-all.jar")
+        }
         mergeServiceFiles()
 
         manifest {

@@ -6,8 +6,8 @@ object ConfigValidation {
         val trimmedHost = host.trim()
         val port = portText.trim().toIntOrNull()
 
-        if (trimmedHost.isBlank() || !trimmedHost.matches(Regex("^[a-zA-Z0-9.-]+$"))) {
-            return "Host must be a non-empty alphanumeric string"
+        if (trimmedHost.lowercase().removeSurrounding("[", "]") !in setOf("127.0.0.1", "localhost", "::1")) {
+            return "MCP host must be a loopback address (127.0.0.1, localhost or ::1)"
         }
 
         if (port == null) {

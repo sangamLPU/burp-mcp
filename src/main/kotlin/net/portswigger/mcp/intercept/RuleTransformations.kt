@@ -258,7 +258,7 @@ internal object RuleTransformations {
         if (types.size > 1) throw UnsupportedRuleMessage("AMBIGUOUS_CONTENT_TYPE")
         val type = types.singleOrNull()?.value.orEmpty()
         if (type.isNotEmpty() && !type.substringBefore(';').trim().equals(expected, true)) throw UnsupportedRuleMessage("CONTENT_TYPE_MISMATCH")
-        if (type.contains("charset=", true) && !Regex("(?i)charset\\s*=\\s*['\"]?utf-8['\"]?(?:\\s*;|$)").containsMatchIn(type)) throw UnsupportedRuleMessage("CHARSET_UNSUPPORTED")
+        ensureUtf8Charset(type)
         if (message.headers.any { it.name.equals("Transfer-Encoding", true) }) throw UnsupportedRuleMessage("TRANSFER_ENCODING_UNSUPPORTED")
         validateFraming(message); decodeUtf8(message.body)
     }
@@ -268,11 +268,20 @@ internal object RuleTransformations {
         if (message.headers.any { it.name.equals("Transfer-Encoding", true) }) throw UnsupportedRuleMessage("TRANSFER_ENCODING_UNSUPPORTED")
         val types = message.headers.filter { it.name.equals("Content-Type", true) }
         if (types.size > 1) throw UnsupportedRuleMessage("AMBIGUOUS_CONTENT_TYPE")
-        val type = types.singleOrNull()?.value?.substringBefore(';')?.trim()?.lowercase().orEmpty()
+        val contentType = types.singleOrNull()?.value.orEmpty()
+        ensureUtf8Charset(contentType)
+        val type = contentType.substringBefore(';').trim().lowercase()
         if (type !in setOf("text/plain", "text/html")) throw UnsupportedRuleMessage("TEXT_CONTENT_TYPE_UNSUPPORTED")
         validateFraming(message)
         val text = decodeUtf8(message.body)
         if (text.any { it.isISOControl() && it !in "\r\n\t" }) throw UnsupportedRuleMessage("TEXT_CONTROL_UNSUPPORTED")
+    }
+    private fun ensureUtf8Charset(contentType: String) {
+        val charsets = contentType.split(';').drop(1).map(String::trim)
+            .filter { it.substringBefore('=').trim().equals("charset", true) }
+        if (charsets.size > 1 || charsets.any {
+                !Regex("(?i)^charset\\s*=\\s*(?:utf-8|\"utf-8\"|'utf-8')\\s*$").matches(it)
+            }) throw UnsupportedRuleMessage("CHARSET_UNSUPPORTED")
     }
     private fun withTextBody(message: RuleHttpMessage, text: String): RuleHttpMessage {
         val bytes = text.toByteArray(StandardCharsets.UTF_8)

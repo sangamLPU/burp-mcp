@@ -44,8 +44,9 @@ class KtorServerManager(private val api: MontoyaApi, private val live: LiveInter
                 server?.stop(1000, 5000)
                 server = null
 
-                if (!isLoopbackBind(config.host)) config.requireBearerToken = true
-                McpServerRuntime.bearerAuthenticationEnforced = config.requireBearerToken
+                require(isLoopbackBind(config.host)) { "MCP listener must bind to loopback" }
+                require(config.requireBearerToken) { "MCP bearer authentication must remain enabled" }
+                McpServerRuntime.bearerAuthenticationEnforced = true
 
                 net.portswigger.mcp.tools.ToolCatalog.clear()
                 val mcpServer = Server(
@@ -63,7 +64,9 @@ class KtorServerManager(private val api: MontoyaApi, private val live: LiveInter
                     mcpServer.registerInterceptionRuleTools(it)
                 }
 
-                server = embeddedServer(Netty, port = config.port, host = config.host) {
+                // Bind numeric loopback even when the UI uses localhost; do not depend on DNS.
+                val bindAddress = if (config.host.removeSurrounding("[", "]").equals("::1", true)) "::1" else "127.0.0.1"
+                server = embeddedServer(Netty, port = config.port, host = bindAddress) {
                     install(CORS) {
                         allowHost("localhost:${config.port}")
                         allowHost("127.0.0.1:${config.port}")
@@ -180,7 +183,6 @@ class KtorServerManager(private val api: MontoyaApi, private val live: LiveInter
     }
 
     private fun isAuthorized(header: String?, config: McpConfig): Boolean {
-        if (!McpServerRuntime.bearerAuthenticationEnforced && !config.requireBearerToken) return true
         val supplied = header?.takeIf { it.startsWith("Bearer ", ignoreCase = true) }
             ?.substringAfter(' ')
             ?.trim()

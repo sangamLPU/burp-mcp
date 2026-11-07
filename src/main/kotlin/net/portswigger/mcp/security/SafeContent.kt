@@ -56,7 +56,7 @@ object SafeContent {
         val isBinary = looksBinary(contentType, sampleBytes)
         val renderedBody = when {
             bodyLength == 0 -> ""
-            isBinary -> "[binary body omitted; $bodyLength bytes, content-type=${contentType.ifBlank { "unknown" }}]"
+            isBinary -> "[binary body omitted; $bodyLength bytes, content-type=${redactHeader("Content-Type", contentType).ifBlank { "unknown" }}]"
             else -> {
                 val charset = charsetFrom(contentType)
                 val text = String(sampleBytes, charset)
@@ -64,7 +64,7 @@ object SafeContent {
             }
         }
         val rendered = buildString {
-            append(startLine)
+            append(redactInlineSecrets(startLine))
             if (headers.isNotEmpty()) append("\r\n").append(headers)
             append("\r\n\r\n")
             append(renderedBody)
@@ -87,10 +87,9 @@ object SafeContent {
 
     /** Redacts sensitive headers and common credential values in a raw HTTP message string. */
     fun redactRaw(raw: String, maxChars: Int = MAX_RENDERED_MESSAGE_CHARS): String {
-        val normalized = raw.replace("\r\n", "\n")
-        val splitAt = normalized.indexOf("\n\n")
-        val prelude = if (splitAt >= 0) normalized.substring(0, splitAt) else normalized
-        val body = if (splitAt >= 0) normalized.substring(splitAt + 2) else ""
+        val separator = Regex("\\r?\\n\\r?\\n").find(raw)
+        val prelude = (separator?.let { raw.substring(0, it.range.first) } ?: raw).replace("\r\n", "\n")
+        val body = separator?.let { raw.substring(it.range.last + 1) }.orEmpty()
         val safePrelude = prelude.lineSequence().mapIndexed { index, line ->
                 if (index == 0) redactUrl(line) else {
                 val colon = line.indexOf(':')
@@ -121,12 +120,12 @@ object SafeContent {
         .replace(jwt, REDACTED)
 
     fun redactHeader(name: String, value: String): String =
-        if (isSensitiveHeader(name)) REDACTED else redactInlineSecrets(value)
+        if (isSensitiveHeader(name)) REDACTED else redactUrl(value)
 
     private fun isSensitiveHeader(name: String): Boolean =
         name.trim().lowercase() in sensitiveHeaders || sensitiveHeaderPattern.containsMatchIn(name)
 
-    private fun redactUrl(input: String): String {
+    internal fun redactUrl(input: String): String {
         val queryAt = input.indexOf('?')
         if (queryAt < 0) return redactInlineSecrets(input)
         val suffixStart = input.indexOfFirstFrom(queryAt) { it.isWhitespace() || it == '#' }
@@ -143,7 +142,7 @@ object SafeContent {
                 else -> name
             }
         }
-        return input.substring(0, queryAt) + "?" + safeQuery + input.substring(suffixStart)
+        return redactInlineSecrets(input.substring(0, queryAt) + "?" + safeQuery + input.substring(suffixStart))
     }
 
     private fun decodeQueryName(name: String): String = runCatching {
