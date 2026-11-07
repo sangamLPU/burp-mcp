@@ -1,14 +1,17 @@
 # Codex connection and verification
 
-The Burp extension exposes a local Streamable HTTP MCP endpoint at
-`http://127.0.0.1:9876/mcp`. Keep it bound to loopback and keep bearer-token
-authentication enabled.
+For complete build/load/rule/cleanup instructions, read [agent setup](AGENT_SETUP.md).
+[Development status](DEVELOPMENT_STATUS.md) is authoritative for current evidence.
+Current checkpoint: dev.6, build `20261107.3-scanner-permission-hardening-dev`.
+Authenticated connectivity and 89 unique tools passed. The last negative-only
+Scanner call returned denial with no Scanner data; native dialog category and
+human DENY selection remain unconfirmed. No retry or further data access is implied.
 
-## Configure Codex
+## Configure the client without storing a token
 
-Codex reads MCP server entries from `%USERPROFILE%\.codex\config.toml`. Merge
-this block into the file; if `[mcp_servers.burp]` already exists, update that
-table instead of adding a duplicate:
+Burp exposes Streamable HTTP at `http://127.0.0.1:9876/mcp`. Keep loopback binding
+and bearer authentication enabled. Merge this table into
+`%USERPROFILE%\.codex\config.toml`; update an existing table instead of duplicating it:
 
 ```toml
 [mcp_servers.burp]
@@ -16,113 +19,67 @@ url = "http://127.0.0.1:9876/mcp"
 bearer_token_env_var = "BURP_MCP_TOKEN"
 ```
 
-The environment variable must contain the bearer token currently shown in the
-Burp MCP tab under **Security**. On Windows, open **Settings → System → About →
-Advanced system settings → Environment Variables**, create or update the user
-variable `BURP_MCP_TOKEN`, and paste the value locally. Do not put the token in
-`config.toml`, a project file, terminal command history, or chat. If the
-variable already exists but Codex receives HTTP 401, replace its value with
-the current token shown by Burp; do not turn off authentication. Do not rotate
-the Burp token unless the current one is unavailable or compromised.
+The environment-backed HTTP setting and `/mcp` status command are documented in the
+[official OpenAI MCP guide](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
+The token value belongs only in the local process environment or a suitable local
+secret mechanism. Do not put it in this repository, TOML literal headers, command
+arguments, reports or chat. The extension reads its token from Burp extension data,
+not from the client's environment variable.
 
-After changing a user variable, open a fresh PowerShell window or set the session
-variable using the secure prompt below. Existing shells and the shared Codex
-daemon retain their inherited environment. Burp must also be running with the
-MCP server enabled. Codex's CLI and IDE extension share the user MCP
-configuration. See the [Codex MCP setup documentation](https://developers.openai.com/codex/mcp)
-and [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
-
-For a session-only token, the following launch workflow is supported. In Burp,
-open **Burp MCP → Security → Bearer token → Copy**, then paste into the secure
-prompt. Copy only the token value, without an `Authorization:` or `Bearer ` prefix.
-Do not paste it into chat or save it in the repository.
+The human copies the current token locally from Burp MCP > Security and enters it
+in a fresh PowerShell session using a masked prompt:
 
 ```powershell
-cd D:\Projects\MCP
+Set-Location D:\Projects\MCP
 $env:BURP_MCP_TOKEN = [System.Net.NetworkCredential]::new(
-    "",
-    (Read-Host "Enter current Burp MCP token" -AsSecureString)
+    '', (Read-Host 'Current Burp MCP token' -AsSecureString)
 ).Password
-codex --yolo
+codex
 ```
 
-Use `/mcp` to check the connection. A nonempty environment variable does not
-prove that its value matches Burp. The extension persists its generated token
-in Burp extension data; it does not read `BURP_MCP_TOKEN`. It generates a new
-token only when its stored token is blank, so a new temporary project or lost
-extension data can change the token. A normal server restart does not rotate it.
+Use the actual clone root if different. No approval-bypass CLI option is required.
+In the client use `/mcp`; then safe status tools must report the expected running
+version/build. Tool catalog registration alone does not prove the connection.
+After use, run `Remove-Item Env:BURP_MCP_TOKEN` in the shell.
 
-If the current token works directly but normal `codex --yolo` returns 401, check
-`codex app-server daemon version`. On CLI 0.167.0, the finalization follow-up
-directly verified that the running daemon held a different `BURP_MCP_TOKEN` from
-the launch environment. Its credential returned 401; the launch credential
-initialized and discovered 89 tools. A fresh normal CLI still reported zero
-Burp tools. The registered URL and authentication configuration were correct.
-This establishes a process-lifetime credential mismatch; a separate connection
-cache or application defect has not been established.
+## Diagnose an authentication failure
 
-Once all Codex sessions and active or queued work have finished, exit the clients
-and use a regular PowerShell window. Populate the current token with the secure
-prompt above, then run these commands **from that same window**:
+HTTP 401 means Burp rejected the supplied credential. Confirm intended project,
+Running endpoint, local token and variable name. A new Temporary Project or lost
+extension data can generate another token; a normal server restart does not
+necessarily rotate it. Do not rotate a working token or turn authentication off.
+Existing processes retain their inherited environment after a user-variable change.
 
-```powershell
-codex app-server daemon restart
-codex app-server daemon version
-codex --yolo
-```
+A historical dev.3 investigation established a shared-daemon/launch-environment
+credential mismatch; it does not prove every future 401 has that cause. First
+check local CLI help and `codex app-server daemon version`. If the current-token
+launch works directly but the shared client does not, a separate `codex --no-daemon`
+launch from that same environment can isolate the issue. Do not restart the daemon
+without demonstrated need and coordination with all active sessions. When all
+work has stopped and the operator has agreed, the locally supported recovery is
+`codex app-server daemon restart` from the current-token shell, then reconnect.
+No daemon restart was performed for this checkpoint.
 
-Installed CLI help supports these commands. The documented `/daemon` restart
-action can interrupt other chats; do not restart during active work. See
-[official background-server management](https://learn.chatgpt.com/docs/developer-commands)
-and [daemon lifetime and bypass](https://learn.chatgpt.com/docs/environments/network-file-systems).
-Run `/mcp` and require `burp: connected (89 tools)`. Normal-mode success after
-restart remains pending operator verification. The previously verified temporary
-workaround is `codex --no-daemon --yolo` from the same current-token shell.
-Do not disable authentication or write a literal token into configuration.
+HTTP 403 can indicate Host/Origin/Referer policy rejection. Browser-like clients
+must supply a legitimately approved Origin. Do not fabricate headers to evade
+policy or change server security settings as a credential fix. The dev.3 approved-
+Origin correction is included in dev.6. Historical detail remains in Git history
+and the local runtime reports indexed by DEVELOPMENT_STATUS.
 
-HTTP 401 means the supplied credential was rejected. HTTP 403 with
-`Blocked browser request without Origin header` means the User-Agent matched
-the server's browser heuristic. Native MCP clients can omit Origin; keep bearer
-authentication enabled. Do not add a fabricated Origin as a credential fix.
-Development build `1.5.0-dev.3` fixes a separate branch error that rejected
-browser-like User-Agents even with an approved Origin. It retains rejection of
-browser-like requests without Origin and all existing bearer, Host and Referer
-checks. The connection repair does not require changing Codex's registered URL
-or authentication method.
+## Replace the development JAR safely
 
-## Check the connection
+Use only the isolated development build command in AGENT_SETUP. Do not use
+`build.ps1` or overwrite `build\libs` in the rollback workspace. Preserve the
+existing matching JAR before any same-version rebuild. Human replacement requires
+safe empty state, unloading the old instance, loading the intended versioned JAR,
+then checking actual path/hash/manifest/running identity and authenticated discovery.
+No filename-only inference or permission reset is acceptable.
 
-1. In Burp, confirm the Burp MCP tab says **Running** and shows
-   `http://127.0.0.1:9876/mcp`.
-2. In Codex's MCP server settings/status, confirm `burp` is connected.
-3. Ask Codex to call `burp_get_status` and `burp_get_capabilities`. These are
-   read-only checks and do not send traffic.
-4. If the server is listed but authorization fails, verify the environment
-   variable name and replace its value with the current Burp token locally.
-   An unauthenticated request returning HTTP 401 is expected and confirms the
-   listener is enforcing authentication; it does not indicate that the URL is
-   wrong.
+## Verify without application traffic
 
-## Verify requests and responses safely
-
-Use the [authorized loopback request procedure](../README.md#harmless-local-request-check)
-to verify an ordinary HTTP request and response against the included local
-test server. It requires explicitly adding `127.0.0.1:8000` to both Burp
-Target scope and the MCP authorized-host allowlist, temporarily turning off
-read-only mode, and approving the request in Burp.
-
-For live interception, follow the [interception verification procedure](LIVE_INTERCEPTION.md#verification).
-Use only a local target you control, authorize it in both Burp scope and the
-extension allowlist, and approve each local Burp prompt yourself. The local
-session has a hard maximum lifetime, automatically renews its short internal
-lease, and stops on disable, expiry, or extension unload. Request/response
-edits require exact-revision human approval before forwarding.
-
-## Replace the extension JAR
-
-Build `build\libs\burp-mcp-all.jar` using `build.ps1`, then in Burp open
-**Extensions → Installed**, unload the old Burp MCP extension, and add the
-replacement Java extension JAR. Do not clear Burp project data or reset the
-extension's security settings. Confirm the endpoint and authentication state
-in the Burp MCP tab, then update the local `BURP_MCP_TOKEN` value if the token
-shown by the reloaded extension differs.
+Use the administrative status tools listed in AGENT_SETUP and the dedicated
+`python -B scripts/live_rule_engine_coordinator.py --target-preflight-only` command.
+Observe native Proxy Intercept and project identity separately. Protected history,
+Scanner and Organizer data are not administrative status checks and may need native
+approval. Do not call them to debug authentication. Test plans and old approvals
+never authorize a send, scan, grant, session or unattended activation.

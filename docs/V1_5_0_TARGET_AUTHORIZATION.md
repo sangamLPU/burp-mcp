@@ -1,5 +1,17 @@
 # v1.5.0 target authorization
 
+Current source/runtime is **dev.6**, build
+`20261107.3-scanner-permission-hardening-dev`, with 89 tools. See
+[development status](DEVELOPMENT_STATUS.md) and [agent setup](AGENT_SETUP.md).
+The separately authorized dev.5 Batch A passed three exact-target POSTs/origins,
+native grant/session binding, both transformations/counters and complete cleanup.
+It is preserved historical evidence and must not be repeated automatically.
+The dev.6 denied Scanner call did not conclusively capture its native category or
+human selection; security and lifecycle gates remain open. Milestone build/count
+and not-yet-loaded statements below are implementation history, not current status.
+
+## Historical milestone implementation notes
+
 Current development status: milestone 2 implements bounded target-specific continuous
 request/response execution. See the milestone 2 section below. Milestone 1 notes
 are retained as implementation history; its execution block is superseded.

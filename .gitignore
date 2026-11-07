@@ -53,3 +53,33 @@ __pycache__/
 
 # Kotlin compiler local state
 .kotlin/
+
+# Local client configuration and credentials (commit only reviewed *.example files)
+/.codex/
+/opencode.json
+/mcp.json
+/.mcp.local.json
+/local.properties
+/gradle.properties.local
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Private traffic, Burp projects, evidence and temporary captures
+*.burp
+*.burp.bak
+*.pcapng
+*.jsonl
+*.hprof
+/reports/
+/evidence/
+/private-evidence/
+*.tmp
+*.bak
+~$*.docx
+
+# Generated archives stay local; the reviewed Gradle wrapper is the sole JAR exception
+*.jar
+*.zip
+!gradle/wrapper/gradle-wrapper.jar

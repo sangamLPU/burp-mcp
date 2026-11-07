@@ -1,150 +1,147 @@
-# Burp MCP Server
+# Burp MCP
 
-**Live interception upgrade:** see [Live interception, OpenCode workflow and tool reference](docs/LIVE_INTERCEPTION.md). The existing endpoint remains `http://127.0.0.1:9876/mcp`. New live capture and edit permissions default to off. See [original tool inventory](docs/ORIGINAL_TOOLS.md) and [OpenCode configuration example](opencode.json.example).
+Burp MCP is a Burp Suite extension that exposes scoped traffic inspection,
+analysis and human-approved testing operations as Model Context Protocol tools.
+It uses the Montoya API, Kotlin MCP SDK and a local Streamable HTTP endpoint.
+It builds on [PortSwigger's MCP server](https://github.com/PortSwigger/mcp-server).
 
-The compatibility baseline and runtime fallbacks for Burp Suite Professional 2024.1 are documented in [Burp 2024.1 compatibility](docs/BURP_2024_1_COMPATIBILITY.md). The loaded extension's version and build ID are returned by `burp_get_status` and `burp_get_capabilities`; MCP initialization reports the same build identity.
+**Current checkpoint: v1.5.0-dev.6**, build
+`20261107.3-scanner-permission-hardening-dev`. Development is paused and features
+are frozen. **v1.5.0 is not approved as a stable release or release candidate.**
+The verified **v1.4.0 rollback release remains preserved**. See
+[development status](docs/DEVELOPMENT_STATUS.md) for evidence and remaining gates.
 
-For Codex MCP configuration, bearer-token recovery, and local request/interception verification, see [Codex connection and verification](docs/CODEX_SETUP.md).
+## Runtime and authentication
 
-The Burp tab's five-section layout, responsive controls, and UI verification notes are in [Burp MCP UI layout](docs/UI_LAYOUT.md).
+The qualified runtime is **Burp Suite Professional 2024.1.1.1**. The extension
+compiles against Montoya 2023.12.1 and targets Java 17. Community supports a subset;
+Scanner and Collaborator require Professional. Other Burp releases are not implied
+verified. See [compatibility notes](docs/BURP_2024_1_COMPATIBILITY.md).
 
-A Burp Suite extension that exposes Burp traffic and approved testing actions as Model Context Protocol tools over Streamable HTTP. It builds on PortSwigger's official [Burp MCP Server](https://github.com/PortSwigger/mcp-server) and uses the official Montoya API and Kotlin MCP SDK.
+MCP listens at `http://127.0.0.1:9876/mcp`, using Streamable HTTP and bearer
+authentication. Dev.6 refuses non-loopback binding or disabled authentication.
+Clients send the current local token through `Authorization: Bearer`, preferably
+from an environment variable. Keep tokens and local client configuration out of
+Git. Host/Origin validation and native Burp permissions remain independent controls.
+There is no bundled SSE-to-stdio proxy or mandatory model gateway.
 
-```mermaid
-flowchart LR
-    C[Claude Code] -- model requests --> O[OmniRoute gateway] --> M[Selected model provider]
-    C -- Streamable HTTP MCP tools --> B[Burp MCP extension]
-    B --> A[Burp Montoya API]
-    A --> T[Burp traffic, scope, Repeater, Scanner]
-```
+## Existing capabilities
 
-OmniRoute is the model gateway in this setup. Its own MCP server exposes OmniRoute management and routing tools; it does not aggregate arbitrary upstream MCP servers. The OmniRoute upstream MCP aggregation request remains closed as not planned, so Claude Code connects separately to the Burp endpoint while `omniroute launch` supplies Claude Code's model API. See the [OmniRoute Claude Code configuration](https://github.com/cheaper-inference/OmniRoute/wiki/Claude-Code-Configuration) and the [upstream aggregation issue](https://github.com/diegosouzapw/OmniRoute/issues/6364).
+- Runtime/capability status, scoped/redacted Proxy history and Site Map, bounded
+  request/response retrieval, comparisons and heuristic security analysis.
+- Human-approved HTTP/1 and HTTP/2 sends, Repeater insertion and bounded passive
+  audit operations where the runtime supports them. Repeater insertion does not send.
+- Manual interception with separate disclosure and exact-revision edit/forward
+  approvals, queues, deadlines and cleanup controls.
+- Disabled-rule preparation, bounded target grants and separately approved target
+  execution sessions; deterministic priority/conflict handling and response association.
+- Scanner scope/attachment filtering, authorized-only report counts, metadata
+  redaction and the dev.6 legacy Scanner native-permission correction.
 
-## Requirements
+HTTP rule transformations support JSON field set/remove, query parameter
+set/remove, URL-encoded form field set/remove, request/response header set/remove,
+and literal replacement in UTF-8 `text/plain` or `text/html`. Body edits validate
+encoding/framing and recalculate Content-Length. Routing, framing and credential
+headers are protected. Rules do not execute scripts or regex replacements.
 
-- Burp Suite with Montoya extension support. Burp Community supports the traffic and analysis tools; Scanner and Collaborator remain Professional-only.
-- Java 17 or later to build. The extension bytecode targets Java 17.
-- Windows 10/11 and PowerShell 5.1+ for the scripts below.
-- For the model client: Node.js supported by your installed OmniRoute release, OmniRoute, and Claude Code CLI.
+## Authorization boundaries
 
-## Build on Windows
+A destination must pass current Burp Target scope and the MCP host allowlist.
+A target preparation grant allows only disabled rule preparation. Execution needs
+a second native human approval binding exact rule IDs/specifications and lifetime.
+Target sessions cannot authorize DROP. Read-only mode, data-disclosure approval,
+request approval and native Proxy Intercept are separate controls. Unattended Local
+Test Mode is a separate legacy policy and cannot approve target grants or sessions.
 
-From PowerShell in the repository directory:
+Never treat installation, preflight, a saved plan or an old approval as permission
+to send traffic, scan, seed findings, expand scope, enable interception or renew
+sessions. Use synthetic controlled targets and separate approval for every live batch.
 
-```powershell
-.\build.ps1
-```
+## Build and manual installation
 
-The script runs the automated tests and packages the extension. The output is `build\libs\burp-mcp-all.jar`. To run the underlying Gradle tasks directly:
-
-```powershell
-.\gradlew.bat clean test shadowJar
-```
-
-No IDE is required. The wrapper downloads the pinned Gradle distribution. The extension JAR is shaded and self-contained. It exposes Streamable HTTP for MCP clients; the outdated Java 21 SSE-to-stdio proxy is not included in this build.
-
-## Install and start the Burp extension
-
-1. Launch Burp Suite.
-2. Open **Extensions → Installed → Add**; select **Java**, then choose `build\libs\burp-mcp-all.jar`.
-3. Open the new **Burp MCP** suite tab. The server starts automatically by default; use the **Enabled** toggle to stop or restart it.
-4. Keep the default host `127.0.0.1` and port `9876`. The endpoint shown in the tab is `http://127.0.0.1:9876/mcp`.
-5. Copy the bearer token from **Server Configuration**. Authentication is enabled by default.
-6. In Burp, add the intended test hosts to **Target → Scope**. Add the same hosts to **Authorized HTTP Host Allowlist** in the extension tab. History and request tools only return or act on targets that pass both checks.
-
-The extension tab shows connection state, the endpoint, the registered Burp tool names, and the latest 100 payload-free MCP activity events. The MCP SDK does not expose connected client identity to this server.
-
-## Configure OmniRoute and Claude Code
-
-Install and start OmniRoute using its [official quick start](https://github.com/cheaper-inference/OmniRoute/blob/release/v3.8.53/docs/getting-started/QUICK-START.md). On Windows, the documented npm flow is:
-
-```powershell
-npm install -g omniroute
-omniroute
-```
-
-Open the dashboard at `http://localhost:20128`, connect a model provider, and confirm it is available. In a second PowerShell window, use Claude Code with OmniRoute as the model API:
+On Windows, use Git, a Java 17 JDK, PowerShell 5.1+ and Python 3.10+ for the
+coordinators. From the repository root:
 
 ```powershell
-omniroute launch
+.\gradlew.bat -PdevelopmentBuild=true --no-configuration-cache test shadowJar --console=plain
 ```
 
-For Claude Code to also discover Burp's MCP tools, copy `.mcp.json.example` to `.mcp.json` in the project where you run Claude Code, then provide the Burp token in the same PowerShell session before launching:
+The wrapper downloads pinned Gradle/dependencies on first use. Development output:
+`build\dev-v1.5.0\libs\burp-mcp-1.5.0-dev.6-all.jar`. JARs are not committed.
+Preserve existing same-version artifacts before rebuilding. Do not run `build.ps1`
+or default-output clean/package commands against the preserved v1.4.0 workspace.
+
+1. In the intended Burp project, inspect queues/authority before any extension
+   replacement. The human unloads the older MCP instance and adds the intended
+   Java JAR through Extensions > Installed > Add. Confirm only one is Loaded.
+2. Verify the actual loaded path, manifest/version/build and disk SHA-256; filenames
+   alone do not establish identity. Confirm Burp MCP reports Running on loopback.
+3. Keep bearer authentication and required native approvals enabled. Configure
+   the client with the local token; see [Codex connection setup](docs/CODEX_SETUP.md),
+   [.mcp.json example](.mcp.json.example) or [OpenCode example](opencode.json.example).
+4. Confirm authenticated MCP initialization and tool discovery with safe status
+   tools. Scope/allowlist configuration needs its own narrow human review. The
+   original controlled configuration is documented in the agent guide.
+
+[Agent setup and operation](docs/AGENT_SETUP.md) is the self-contained text guide
+for a fresh restart/clone, building, loading, token handling, safe tools, rules,
+preflight and cleanup. It also supplies manual setup instructions. The requested
+Word guides `docs/Burp_MCP_Manual_Setup_and_Use.docx` and
+`docs/Burp_MCP_Agent_Automated_Setup_Runbook.docx` are **missing** from this
+checkpoint; they have not been added or reviewed.
+
+## Tests and non-traffic preflight
+
+The Gradle command above runs mock-backed JVM and embedded local MCP transport
+tests. Against an existing matching development JAR, this fast subset avoids
+repackaging:
 
 ```powershell
-Copy-Item .mcp.json.example .mcp.json
-$env:BURP_MCP_TOKEN = Read-Host "Paste the Burp MCP bearer token"
-omniroute launch
+.\gradlew.bat -PdevelopmentBuild=true -x shadowJar --no-configuration-cache test --tests '*BuildInfoTest' --tests '*McpServerIntegrationTest.scanner listing permission*' --console=plain
+python -B -m unittest discover -s scripts -p 'test_live_rule_engine_coordinator.py'
+powershell -NoProfile -File .\scripts\test-phase2-method-fixture.ps1
+git diff --check
 ```
 
-The example uses `${BURP_MCP_TOKEN}` for Claude Code's supported environment expansion. Keep the token out of Git and unset it when finished:
+The full offline Python suite is `python -B -m unittest discover -s scripts -p 'test_*.py'`. The pure fixture suite creates no listener or request.
+With the intended running Burp and existing approved configuration:
 
 ```powershell
-Remove-Item Env:BURP_MCP_TOKEN
+python -B scripts/live_rule_engine_coordinator.py --target-preflight-only
 ```
 
-Alternatively, add the endpoint to Claude Code's local user configuration with its supported HTTP MCP command (the header is saved in Claude Code's local config):
+This checks MCP/runtime/scope and Proxy TCP availability; it sends no application
+HTTP request and creates no authorization. **Do not omit the flag:** the legacy
+no-argument coordinator executes traffic. Native project identity and Intercept
+state require separate observation. No live campaign is run by this checkpoint.
 
-```powershell
-$env:BURP_MCP_TOKEN = Read-Host "Paste the Burp MCP bearer token"
-claude mcp add --transport http burp-mcp http://127.0.0.1:9876/mcp --header "Authorization: Bearer $env:BURP_MCP_TOKEN"
-Remove-Item Env:BURP_MCP_TOKEN
-```
+## Verified status and limitations
 
-Then start the model-routed client with `omniroute launch`. Check the MCP connection with:
+Dev.6 authenticated connectivity, loaded identity/checksum, 89 unique tool discovery
+and non-traffic preflight passed runtime verification. **89 registered tools does
+not mean every tool was individually live-tested.** The offline dev.5 baseline is
+303 JVM and 118 Python passes, four offline PowerShell suites and 24 syntax checks.
+Dev.6 native-permission hardening has focused regression evidence.
 
-```powershell
-claude mcp get burp-mcp
-claude mcp list
-```
+Batch A HTTP transformations passed live on **dev.5**: exactly three POSTs, three
+HTTP 200 responses, three independent origin deliveries, correct counters and full
+cleanup. This is preserved historical evidence, not a repeated dev.6 live result.
+The later dev.6 negative-only Scanner call returned denial without Scanner data,
+but its native dialog category and human DENY selection were not conclusively
+captured. That gate is not fully verified.
 
-Inside Claude Code, `/mcp` shows connected servers. Ask it to call `burp_get_capabilities` or `burp_get_status`; those tools do not make network requests. The `.mcp.json.example` template uses the regular Claude Code HTTP MCP fields `type`, `url`, and `headers`.
+Native nonempty Scanner security and lifecycle/reliability testing remain incomplete.
+Repeater tab enumeration is unsupported; project identification/Organizer APIs may
+be unavailable on this baseline. Active audits are disabled. Rule transforms do
+not support multipart, binary, compressed, chunked, streaming or WebSocket content.
+Analysis is heuristic and credential redaction is not a general data-loss guarantee.
+Timeout/cancellation does not prove that a native request never reached its origin.
 
-## Harmless local request check
-
-1. Start the local test server in one PowerShell window:
-
-   ```powershell
-   .\scripts\local-test-server.ps1
-   ```
-
-   It listens only on `127.0.0.1:8000`. Stop it with Ctrl+C.
-
-2. In Burp's **Target → Scope**, add `http://127.0.0.1:8000`. Add `127.0.0.1:8000` to the Burp MCP authorized-host allowlist.
-3. In **Burp MCP**, turn off **Read-only mode** for this request only. Keep **Require bearer token** enabled.
-4. In Claude Code, ask it to send this exact request using `burp_send_http_request`, and review Burp's one-time approval dialog before approving:
-
-   ```http
-   GET / HTTP/1.1
-   Host: 127.0.0.1:8000
-   Connection: close
-   ```
-
-   Use host `127.0.0.1`, port `8000`, and `https: false`. The expected response body is `Burp MCP local test endpoint`.
-
-5. Turn **Read-only mode** back on, stop the test server, and disable the extension server when finished.
-
-## Tools and capability limits
-
-The extension exposes connection/project status; filtered Proxy history and Site Map; request and response retrieval and summaries; response comparisons; request modification proposals; Repeater insertion; HTTP/1 and HTTP/2 send tools; heuristic header, cookie, CORS, authentication, and sensitive-data analysis; and bounded security reports.
-
-- `burp_send_http_request`, `burp_send_to_repeater`, and `burp_start_scan` require read-only mode off, an explicit host allowlist match, Burp scope membership, a rate-limit slot, and a fresh user approval. `burp_start_scan` launches a passive audit for one submitted request only. Active checks are disabled because the available Montoya API exposes only legacy active checks, which may include intrusive tests. Repeater insertion does not send the request; the user must click **Send** in Burp. No dedicated credential-attack or brute-force tools, Intruder automation, or unrestricted scan tool is exposed.
-- Scanner findings and scan controls report an explicit unsupported-capability error in Community Edition. The current Montoya API cannot enumerate existing Repeater tabs, so `burp_get_repeater_tabs` reports unsupported rather than returning fabricated data.
-- HTTP output is bounded, binary bodies are omitted, credentials are redacted, and captured content is marked untrusted. Security-analysis observations are heuristic; suspicious patterns are not labeled confirmed vulnerabilities.
-- HTTP requests have a 10-second response timeout and MCP-triggered network actions are limited to 30 per minute.
-- The listener binds to loopback by default. If you deliberately bind to a non-loopback address, bearer authentication must remain enabled. Use a firewall and do not expose the port to untrusted networks.
-
-## Tests and real Burp verification
-
-`.\gradlew.bat test` runs automated mock-backed tests and local MCP transport integration tests, including initialization, tool listing, input validation, permission checks, redaction, and parsing. The tests do not connect to a live Burp instance. A live Burp verification is the local-request procedure above; do not treat mock test success as proof of compatibility with every Burp release or edition.
-
-The practical live-edit checks completed against Burp Suite Professional 2024.1.1.1 and MCP extension v1.3.1 are recorded in [Live interception test results](docs/LIVE_INTERCEPTION_TEST_RESULTS.md). They verified approved POST JSON and URL-encoded form editing, a dedicated test-cookie edit, a `Set-Cookie` response edit, HTML response-body and multipart file-upload editing, and a two-request concurrent interception check using only loopback traffic. The report separates HTTP delivery evidence from Burp History display and records the final user-confirmed browser-rendering pass.
-
-## References
-
-- [PortSwigger Burp MCP Server](https://github.com/PortSwigger/mcp-server)
-- [Montoya API documentation](https://portswigger.github.io/burp-extensions-montoya-api/)
-- [Kotlin MCP SDK](https://github.com/modelcontextprotocol/kotlin-sdk)
-- [Claude Code MCP setup](https://code.claude.com/docs/en/mcp)
-- [OmniRoute quick start](https://github.com/cheaper-inference/OmniRoute/blob/release/v3.8.53/docs/getting-started/QUICK-START.md)
-- [OmniRoute Claude Code model routing](https://github.com/cheaper-inference/OmniRoute/wiki/Claude-Code-Configuration)
+Read [remaining supervised batches](docs/SUPERVISED_CAMPAIGN.md),
+[target authorization](docs/V1_5_0_TARGET_AUTHORIZATION.md),
+[Phase 2 plan](docs/PHASE2_TARGET_SESSION_PLAN.md),
+[rule reference](docs/INTERCEPTION_RULE_ENGINE.md) and
+[verification details](docs/V1_5_0_VERIFICATION.md) before resuming.
+Private reports/build outputs stay local under ignored `build/`; sanitized handoff
+summaries are committed under `docs/`. No v1.5.0 tag, release or release candidate
+is created by this development checkpoint.

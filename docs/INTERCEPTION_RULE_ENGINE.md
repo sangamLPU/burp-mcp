@@ -1,5 +1,10 @@
 # Burp MCP interception rule engine
 
+For current v1.5.0 target-specific preparation/session execution and verification
+limits, see [v1.5.0 verification](V1_5_0_VERIFICATION.md). The unattended workflow
+below describes the separate legacy nine-path policy, which cannot approve target
+grant/session prompts.
+
 ## What it does
 
 The rule engine runs inside the existing `LiveInterception` Proxy request and response callbacks. It evaluates bounded rules against each held message before the existing callback releases it. A matching rule does not make a network decision by itself: the exact message still has to pass the current Burp scope, explicit MCP allowlist, identity, revision, heartbeat, session, and unattended-policy checks. The existing decision queue remains the source of message IDs, revisions, deadlines, one-time approval, and final release.
@@ -90,4 +95,4 @@ Rule updates and disables are generation-checked. A change during evaluation inv
 
 Counters report request/response matches, actual modifications, automatic forwards/drops, skipped operations, failures, remaining match and modification budgets, expiry, and last sanitized error code. Clearing audit counters does not reset the separately tracked consumed match/modification budgets. Event history is bounded to 500 entries and records rule/message IDs, direction, outcome, approval mode, and short codes. It never stores headers, bodies, tokens, cookies, or server identity.
 
-Unit and mocked Proxy-callback tests establish evaluator and integration behavior. They are not `LIVE_PROXY` evidence. A real Burp Proxy verification is still required to prove changes reach the actual origin and client. See [AI agent examples](AI_AGENT_INTERCEPTION_EXAMPLES.md) for prompts and MCP call ordering.
+Unit and mocked Proxy-callback tests establish evaluator and integration behavior. They are not `LIVE_PROXY` evidence. The separately approved dev.5 Batch A proved its two exact-target transformations reached the origin and client; it does not establish all operations or the remaining native priority/lifecycle/reliability cases. See [development status](DEVELOPMENT_STATUS.md). See [AI agent examples](AI_AGENT_INTERCEPTION_EXAMPLES.md) for prompts and MCP call ordering.
