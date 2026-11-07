@@ -21,6 +21,11 @@ from live_rule_engine_coordinator import (
     LiveRuleEngineCoordinator,
     WaitingForApproval,
     build_rule_specs,
+    build_target_session_rule_specs,
+    TARGET_SESSION_URL,
+    TargetSessionExchangeBatch,
+    target_session_preflight,
+    require_target_session_readiness,
     require_pretraffic_readiness,
     response_wait_state,
     rule_readiness_failures,
@@ -28,6 +33,241 @@ from live_rule_engine_coordinator import (
 
 
 RUN_ID = "11111111-2222-3333-4444-555555555555"
+
+
+class TargetSessionPreparationTest(unittest.TestCase):
+    def test_preflight_cli_cannot_enter_legacy_live_runner(self):
+        import live_rule_engine_coordinator as module
+        with patch.object(module.preflight, 'initialize'), patch.object(module, 'target_session_preflight', return_value={'state':'PASS'}), patch.object(module.LiveRuleEngineCoordinator, 'run') as live, patch('builtins.print'):
+            self.assertEqual(module.main(['--target-preflight-only']), 0)
+            live.assert_not_called()
+        with patch.object(module.preflight, 'initialize') as initialize, patch('builtins.print'):
+            self.assertEqual(module.main(['--unknown']), 2)
+            initialize.assert_not_called()
+
+    def test_missing_references_are_rejected_before_any_mcp_call(self):
+        from unittest.mock import Mock
+        client=Mock()
+        for grant, expected, owned in (('', {}, []), ('bad-id', {'a':{},'b':{}}, ['a','b']),
+                                       (RUN_ID, {'missing':{}}, [])):
+            with self.assertRaises(CoordinatorError):
+                require_target_session_readiness(client, grant, expected, owned)
+        client.tool.assert_not_called()
+
+    def ready_target_session(self):
+        from unittest.mock import Mock
+        expected = dict(zip(('request-id', 'response-id'), build_target_session_rule_specs(RUN_ID)))
+        data = {
+            'burp_get_intercept_status': dict(enabled=True, editsEnabled=True, heartbeatHealth='HEALTHY',
+                sessionLifetimeSeconds=120, sessionRemainingMillis=100000, unattendedMode={'active': False}, pendingRequests=0, pendingResponses=0),
+            'burp_list_target_rule_authorizations': [dict(id=RUN_ID, urls=[TARGET_SESSION_URL], remainingMillis=200000)],
+            'burp_list_interception_rules': [dict(id=k, spec=copy.deepcopy(v), state='ACTIVE') for k,v in expected.items()],
+            'burp_get_rule_engine_status': dict(configuredRules=2, enabledRules=2, emergencyStopped=False),
+        }
+        client = Mock()
+        client.tool.side_effect = lambda name, **kwargs: data[name]
+        return client, expected, data
+
+    def test_per_attempt_gate_accepts_exact_state_and_serialization_defaults(self):
+        client, expected, data = self.ready_target_session()
+        for r in data['burp_list_interception_rules']:
+            for key in ('action', 'priority', 'durationSeconds'):
+                del r['spec'][key]
+        self.assertTrue(require_target_session_readiness(client, RUN_ID, expected, expected))
+        client.rpc.assert_not_called()
+        self.assertTrue(all(call.args[0].startswith(('burp_get_', 'burp_list_')) for call in client.tool.call_args_list))
+
+    def test_per_attempt_gate_rejects_boolean_and_fractional_counters(self):
+        for tool, field, value in (
+            ('burp_get_intercept_status', 'pendingRequests', False),
+            ('burp_get_intercept_status', 'pendingResponses', 0.0),
+            ('burp_get_intercept_status', 'sessionLifetimeSeconds', 120.0),
+            ('burp_get_rule_engine_status', 'configuredRules', 2.0),
+        ):
+            with self.subTest(tool=tool, field=field):
+                client, expected, data = self.ready_target_session()
+                data[tool][field] = value
+                with self.assertRaises(CoordinatorError):
+                    require_target_session_readiness(client, RUN_ID, expected, expected)
+
+    def test_per_attempt_gate_rejects_expiry_changed_grants_and_rule_specs(self):
+        for variant in ('grant-missing','grant-path','grant-expired','session-expired','unattended','changed-rule','missing-rule'):
+            with self.subTest(variant=variant):
+                client, expected, data = self.ready_target_session()
+                if variant == 'grant-missing': data['burp_list_target_rule_authorizations'] = []
+                if variant == 'grant-path': data['burp_list_target_rule_authorizations'][0]['urls'] = ['http://127.0.0.1:8000/test-post']
+                if variant == 'grant-expired': data['burp_list_target_rule_authorizations'][0]['remainingMillis'] = 1
+                if variant == 'session-expired': data['burp_get_intercept_status']['sessionRemainingMillis'] = 1
+                if variant == 'unattended': data['burp_get_intercept_status']['unattendedMode']['active'] = True
+                if variant == 'changed-rule': data['burp_list_interception_rules'][0]['spec']['maximumMatches'] = 3
+                if variant == 'missing-rule': data['burp_list_interception_rules'].pop()
+                with self.assertRaises(CoordinatorError):
+                    require_target_session_readiness(client, RUN_ID, expected, expected)
+
+    def test_per_attempt_gate_rejects_unbound_active_control(self):
+        client, expected, data = self.ready_target_session()
+        data['burp_list_interception_rules'].append(dict(id='control', state='DISABLED'))
+        data['burp_get_rule_engine_status']['configuredRules'] = 3
+        owned = list(expected) + ['control']
+        self.assertTrue(require_target_session_readiness(client, RUN_ID, expected, owned))
+        data['burp_list_interception_rules'][-1]['state'] = 'ACTIVE'
+        with self.assertRaises(CoordinatorError):
+            require_target_session_readiness(client, RUN_ID, expected, owned)
+
+    def test_failed_http_result_preserves_status_and_hash_without_raw_body(self):
+        saved=[]
+        response = {'status': 503, 'responseSha256': 'b'*64, 'body': {'unexpected': 'do not persist'}}
+        batch = TargetSessionExchangeBatch(lambda c: response, lambda: True, lambda c: [], saved.append)
+        with self.assertRaises(CoordinatorError):
+            batch.run(['one','two','three'])
+        self.assertEqual(saved[-1]['clientStatus'], 503)
+        self.assertEqual(saved[-1]['responseSha256'], 'b'*64)
+        self.assertNotIn('do not persist', json.dumps(saved))
+
+    def test_read_only_preflight_checks_catalog_scope_and_clean_state(self):
+        from unittest.mock import Mock
+        import live_rule_engine_coordinator as module
+        snapshot = {
+            'connection': {'burpConnected': True, 'burpVersion': 'Burp Suite Professional 2024.1.1.1'},
+            'server': {'extensionVersion': '1.5.0-dev.6', 'buildId': EXPECTED_BUILD_ID, 'serverState': 'running',
+                       'bearerAuthenticationRequired': True, 'readOnlyMode': False, 'authorizedTargetCount': 1},
+            'interception': {'enabled': False, 'editsEnabled': True, 'unattendedMode': {'active': False},
+                             'pendingRequests': 0, 'pendingResponses': 0},
+            'engine': {'configuredRules': 0, 'enabledRules': 0, 'emergencyStopped': False},
+            'requests': [], 'responses': [], 'rules': [],
+            'scope': {'checks': [{'url': u, 'eligible': True} for u in module.preflight.LOCAL_TEST_URLS]},
+        }
+        client = Mock()
+        client.rpc.return_value = {'tools': [{'name': f'tool-{i}'} for i in range(89)]}
+        client.tool.side_effect = lambda name, **kwargs: {'checks': [{'url': TARGET_SESSION_URL, 'eligible': True}]} if name == 'burp_get_scope' else []
+        with patch.object(LiveRuleEngineCoordinator, '_snapshot', return_value=snapshot), patch.object(module.preflight, 'check_proxy_listener'):
+            self.assertEqual(target_session_preflight(client)['state'], 'PASS')
+            snapshot['interception']['unattendedMode']['active'] = True
+            with self.assertRaises(CoordinatorError):
+                target_session_preflight(client)
+        self.assertTrue(all(call.args[0] in ('burp_get_scope', 'burp_list_target_rule_authorizations') for call in client.tool.call_args_list))
+
+    def test_bad_case_batch_cannot_start_network_or_reuse_identifiers(self):
+        from unittest.mock import Mock
+        sender = Mock()
+        for cases in (None, ['same']*3, ['only-one'], ['good', 'bad/id', 'other']):
+            batch = TargetSessionExchangeBatch(sender, lambda: True, lambda c: [], lambda e: None)
+            with self.assertRaises(CoordinatorError):
+                batch.run(cases)
+        sender.assert_not_called()
+
+    def test_malformed_json_response_is_not_success_and_closes_connection(self):
+        from unittest.mock import Mock
+        connection = Mock()
+        connection.getresponse.return_value.read.return_value = b'not-json'
+        connection.getresponse.return_value.getheaders.return_value = []
+        with patch('live_rule_engine_coordinator.http.client.HTTPConnection', return_value=connection):
+            with self.assertRaises(json.JSONDecodeError):
+                LiveRuleEngineCoordinator._http_post('one', '', '', target_url=TARGET_SESSION_URL)
+        connection.close.assert_called_once()
+
+    @staticmethod
+    def evidence(case):
+        body = dict(case=case, enabled=True, name='original', mcp_test='after', marker='preserve',
+                    nested={'keep': 17}, method='POST', path='/test-post-phase2', bodySha256='a'*64, bodyByteLength=123)
+        origin = dict(ruleTestId=case, path='/test-post-phase2', postEnabled=True,
+                      ruleTestHeaderObserved=True, bodyFramingVerified=True, utf8BodyValid=True,
+                      bodySha256='a'*64, bodyByteLength=123)
+        return {'status': 200, 'body': body}, origin
+
+    def test_batch_sends_one_baseline_and_two_overlapping_clients_only_once(self):
+        overlap = threading.Barrier(2)
+        calls, saved = [], []
+        def sender(case):
+            calls.append(case)
+            if case != 'baseline':
+                overlap.wait(timeout=2)
+            return self.evidence(case)[0]
+        batch = TargetSessionExchangeBatch(sender, lambda: True, lambda c: [self.evidence(c)[1]], saved.append)
+        self.assertEqual(len(batch.run(['baseline', 'concurrent-a', 'concurrent-b'])), 3)
+        self.assertEqual(calls[0], 'baseline')
+        self.assertEqual(batch.attempts, 3)
+        self.assertEqual(len([e for e in saved if e['state'] == 'PASS']), 3)
+        with self.assertRaises(CoordinatorError):
+            batch.run(['another', 'batch', 'refused'])
+        self.assertEqual(len(calls), 3)
+
+    def test_failed_baseline_preserves_failure_without_retry_or_concurrent_clients(self):
+        from unittest.mock import Mock
+        sender = Mock(side_effect=TimeoutError('synthetic'))
+        saved = []
+        batch = TargetSessionExchangeBatch(sender, lambda: True, lambda c: [], saved.append)
+        with self.assertRaises(TimeoutError):
+            batch.run(['one', 'two', 'three'])
+        sender.assert_called_once_with('one')
+        self.assertEqual([e['state'] for e in saved], ['STARTED', 'FAIL'])
+
+    def test_missing_readiness_starts_no_client(self):
+        from unittest.mock import Mock
+        sender = Mock()
+        batch = TargetSessionExchangeBatch(sender, lambda: None, lambda c: [], lambda e: None)
+        with self.assertRaises(CoordinatorError):
+            batch.run(['one', 'two', 'three'])
+        sender.assert_not_called()
+
+    def test_malformed_response_duplicate_origin_and_missing_transform_fail(self):
+        for variant in ('missing', 'duplicate', 'unmodified', 'wrong-case'):
+            with self.subTest(variant=variant):
+                result, origin = self.evidence('one')
+                origins = [origin]
+                if variant == 'missing': result = None
+                if variant == 'duplicate': origins = [origin, origin]
+                if variant == 'unmodified': result['body']['enabled'] = False
+                if variant == 'wrong-case': origin['ruleTestId'] = 'other'
+                batch = TargetSessionExchangeBatch(lambda c: result, lambda: True, lambda c: origins, lambda e: None)
+                with self.assertRaises(CoordinatorError):
+                    batch.run(['one', 'two', 'three'])
+                self.assertEqual(batch.attempts, 1)
+
+    def test_oversized_target_response_is_bounded_and_connection_closed(self):
+        from unittest.mock import Mock
+        connection = Mock()
+        connection.getresponse.return_value.read.return_value = b'x' * 65537
+        with patch('live_rule_engine_coordinator.http.client.HTTPConnection', return_value=connection):
+            with self.assertRaises(CoordinatorError):
+                LiveRuleEngineCoordinator._http_post('one', '', '', target_url=TARGET_SESSION_URL)
+        connection.getresponse.return_value.read.assert_called_once_with(65537)
+        connection.close.assert_called_once()
+
+    def test_two_bounded_rules_bind_new_exact_path_and_combine_request_edits(self):
+        request, response = build_target_session_rule_specs(RUN_ID)
+        self.assertEqual(len(request['transformations']), 2)
+        self.assertEqual(request['transformations'][1]['type'], 'SET_REQUEST_HEADER')
+        self.assertEqual([request['direction'], response['direction']], ['REQUEST', 'RESPONSE'])
+        for spec in (request, response):
+            self.assertEqual(spec['authorizationReference'], RUN_ID)
+            self.assertEqual(spec['targetUrl'], TARGET_SESSION_URL)
+            self.assertEqual(spec['conditions']['path'], '/test-post-phase2')
+            self.assertEqual(spec['durationSeconds'], 120)
+            self.assertEqual(spec['maximumMatches'], 4)
+            self.assertEqual(spec['maximumModifications'], 4)
+        self.assertEqual(build_rule_specs(RUN_ID)[0]['targetUrl'], 'http://127.0.0.1:8000/test-post')
+
+    def test_unapproved_client_target_is_rejected_before_connecting(self):
+        with patch('live_rule_engine_coordinator.http.client.HTTPConnection') as connection:
+            with self.assertRaises(CoordinatorError):
+                LiveRuleEngineCoordinator._http_post('phase2-one', '', '', target_url='http://127.0.0.1:8000/test-post-phase2-extra')
+            connection.assert_not_called()
+
+    def test_phase2_client_uses_exact_url_without_legacy_identity_headers(self):
+        from unittest.mock import Mock
+        connection = Mock()
+        connection.getresponse.return_value.read.return_value = b'{"enabled":true}'
+        connection.getresponse.return_value.getheaders.return_value = []
+        with patch('live_rule_engine_coordinator.http.client.HTTPConnection', return_value=connection):
+            LiveRuleEngineCoordinator._http_post('phase2-one', '', '', target_url=TARGET_SESSION_URL)
+        args, kwargs = connection.request.call_args
+        self.assertEqual(args, ('POST', TARGET_SESSION_URL))
+        self.assertEqual(json.loads(kwargs['body'])['enabled'], False)
+        self.assertEqual(kwargs['headers']['X-MCP-Test-ID'], 'phase2-one')
+        self.assertNotIn('X-MCP-Server-Identity', kwargs['headers'])
+        connection.request.assert_called_once()
+        connection.close.assert_called_once()
 
 
 def rule_entries(active_names=CORE_ACTIVE_RULES):

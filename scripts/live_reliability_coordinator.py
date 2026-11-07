@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import cancel_test_preflight as preflight
-from live_rule_engine_coordinator import CoordinatorError, LiveRuleEngineCoordinator
+from live_rule_engine_coordinator import CoordinatorError, LiveRuleEngineCoordinator, EXPECTED_BUILD_ID
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,13 +28,25 @@ def aggregate_phase_status(phases):
 
 
 def decode_tool_result(result):
-    if not isinstance(result, dict) or result.get("isError"):
+    if not isinstance(result, dict) or result.get("isError", False) is not False:
         raise CoordinatorError("TOOL_REJECTED", "MCP tool rejected the exact operation")
-    text = "\n".join(x.get("text", "") for x in result.get("content", []))
+    content = result.get("content")
+    if ("structuredContent" in result or "error" in result or "result" in result or
+            not isinstance(content, list) or len(content) != 1 or
+            not isinstance(content[0], dict) or content[0].get("type") != "text" or
+            not isinstance(content[0].get("text"), str) or
+            not content[0]["text"].strip() or len(content[0]["text"]) > preflight.MAX_MCP_RESPONSE_BYTES):
+        raise CoordinatorError("MALFORMED_TOOL_RESULT", "MCP tool result did not contain one bounded text payload")
+    text = content[0]["text"]
     try:
-        return json.loads(text)
+        decoded = json.loads(text)
     except json.JSONDecodeError:
-        return text
+        if text.startswith(("DROPPED:", "FORWARDED:", "Human approved revision ")):
+            return text
+        raise CoordinatorError("UNEXPECTED_TOOL_RESULT", "MCP tool did not confirm the requested operation")
+    if not isinstance(decoded, (dict, list)):
+        raise CoordinatorError("MALFORMED_TOOL_RESULT", "MCP tool returned an unexpected scalar payload")
+    return decoded
 
 
 class ReliabilityCoordinator(LiveRuleEngineCoordinator):
@@ -43,7 +55,7 @@ class ReliabilityCoordinator(LiveRuleEngineCoordinator):
         self.tag = uuid.uuid4().hex
         self.report_path = ROOT / "build/reports/reliability" / f"phases-4abcd-{self.tag}.json"
         self.evidence_path = self.report_path.with_suffix(".exchanges.jsonl")
-        self.report = {"state": "PREPARING", "buildId": "20261101.13-burp2024.1.1.1", "phases": [], "toolsExercised": [], "clientAttempts": 0}
+        self.report = {"state": "PREPARING", "buildId": EXPECTED_BUILD_ID, "phases": [], "toolsExercised": [], "clientAttempts": 0}
         self.active_workers = []
 
     def save(self):

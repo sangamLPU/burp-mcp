@@ -7,10 +7,31 @@ from unittest.mock import patch
 from urllib.parse import parse_qs
 
 from live_reliability_coordinator import ReliabilityCoordinator, decode_tool_result, aggregate_phase_status
-from live_rule_engine_coordinator import CoordinatorError
+from live_rule_engine_coordinator import CoordinatorError, EXPECTED_BUILD_ID
 
 
 class ReliabilityCoordinatorTests(unittest.TestCase):
+    def test_malformed_tool_envelopes_never_count_as_success(self):
+        for result in ({}, {"content": []}, {"content": None}, {"content": [{}]},
+                       {"content": [{"type": "image", "text": "ok"}]},
+                       {"content": [{"text": 3}]}, {"content": [{"text": ""}]},
+                       {"isError": 0, "content": [{"text": "ok"}]},
+                       {"structuredContent": {"ok": True}, "content": [{"text": "ok"}]},
+                       {"error": {"code": 1}, "content": [{"text": "ok"}]}):
+            with self.subTest(result=result), self.assertRaises(CoordinatorError):
+                decode_tool_result(result)
+
+    def test_unexpected_approval_or_denial_text_is_not_a_completed_action(self):
+        for message in ("Approval required.", "Denied: no approval.", "Tool failed (TimeoutException)."):
+            with self.subTest(message=message), self.assertRaises(CoordinatorError):
+                decode_tool_result({"content": [{"type": "text", "text": message}]})
+
+    def test_report_build_matches_shared_runtime_gate_without_starting_work(self):
+        runner = ReliabilityCoordinator(object())
+        self.assertEqual(runner.report['buildId'], EXPECTED_BUILD_ID)
+        self.assertEqual(runner.client_attempts_started, 0)
+        self.assertEqual(runner.report['phases'], [])
+
     def test_partial_or_inconclusive_phase_cannot_be_reported_as_overall_pass(self):
         phases = [{"phase": name, "state": "PASS"} for name in ("4A", "4B", "4C", "4D")]
         self.assertEqual("PASS", aggregate_phase_status(phases))
@@ -21,7 +42,7 @@ class ReliabilityCoordinatorTests(unittest.TestCase):
     def test_plain_terminal_tool_results_are_not_misclassified_as_json_errors(self):
         result = {"content": [{"type": "text", "text": "DROPPED: local callback released"}]}
         self.assertTrue(decode_tool_result(result).startswith("DROPPED"))
-        self.assertEqual({"enabled": False}, decode_tool_result({"content": [{"text": '{"enabled":false}'}]}))
+        self.assertEqual({"enabled": False}, decode_tool_result({"content": [{"type": "text", "text": '{"enabled":false}'}]}))
         with self.assertRaises(CoordinatorError):
             decode_tool_result({"isError": True, "content": [{"text": "rejected"}]})
 

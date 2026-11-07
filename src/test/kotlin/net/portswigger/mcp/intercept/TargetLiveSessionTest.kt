@@ -98,6 +98,27 @@ class TargetLiveSessionTest {
     }
     private fun execute(req: HttpRequest, id: Int = 1) = live.processTargetMessage("request", HeldMessage(req, req), id)
 
+    @Test fun `safe query variants stay on the approved path while credential keys remain unchanged`() {
+        start()
+        val safe = request("$target?x=one&x=&keep=%E9%9B%AA")
+        val changed = execute(safe)
+        assertTrue(String(changed.message.body().getBytes()).contains("true"))
+        assertEquals(safe.url(), changed.request.url())
+        for (query in listOf("password=synthetic", "p%61ssword=synthetic", "token=synthetic")) {
+            val sensitive = request("$target?$query")
+            assertSame(sensitive, execute(sensitive).message)
+        }
+    }
+
+    @Test fun `userinfo encoded aliases and traversal never inherit exact path authority`() {
+        start()
+        for (url in listOf("https://user:synthetic@fixture.example:443/lab", "https://fixture.example:443/a/../lab",
+                "https://fixture.example:443/./lab", "https://fixture.example:443/%6cab", "https://fixture.example:443//lab")) {
+            val original = request(url)
+            assertSame(original, execute(original).message, url)
+        }
+    }
+
     @Test fun `approved request and associated response transformations execute without a manual queue`() {
         val id = start()
         val req = request()

@@ -12,6 +12,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'local-test-method-fixture.ps1')
 if ($IdentityFromEnvironment) {
     $TestRunId = [Environment]::GetEnvironmentVariable('BURP_TEST_RUN_ID', 'Process')
     $ServerIdentity = [Environment]::GetEnvironmentVariable('BURP_TEST_SERVER_IDENTITY', 'Process')
@@ -400,7 +401,7 @@ try {
                 $query = if ($targetParts.Length -gt 1) { $targetParts[1] } else { '' }
             }
             $knownTestPaths = @(
-                '/live-check', '/test-html', '/test-post', '/test-form', '/test-upload',
+                '/live-check', '/test-html', '/test-post', '/test-post-phase2', '/test-form', '/test-upload',
                 '/test-cookie', '/test-set-cookie', '/test-cancel', '/test-timeout',
                 '/test-session-expiry', '/test-concurrent-a', '/test-concurrent-b',
                 '/test-binary', '/test-unicode', '/test-empty', '/test-large', '/test-method', '/test-headers'
@@ -517,7 +518,7 @@ try {
             $postBodyVerified = $null
             $postEnabled = $null
             $postJson = $null
-            if ($path -eq '/test-post') {
+            if ($path -eq '/test-post' -or $path -ceq '/test-post-phase2') {
                 $postBodyVerified = $false
                 try {
                     $postJson = ConvertFrom-Json -InputObject $requestBody -ErrorAction Stop
@@ -681,6 +682,8 @@ try {
                 }
                 $record['ruleTestId'] = $ruleTestId
                 $record['postEnabled'] = $postEnabled
+                $record['expectedLocalHostObserved'] = $requestHeaders.ContainsKey('Host') -and $requestHeaders['Host'] -ceq '127.0.0.1:8000'
+                $record['localhostAliasHostObserved'] = $requestHeaders.ContainsKey('Host') -and $requestHeaders['Host'] -ceq 'localhost:8000'
                 $record['ruleTestHeaderObserved'] = $requestHeaders.ContainsKey('X-MCP-Rule-Test') -and $requestHeaders['X-MCP-Rule-Test'] -ceq 'active'
                 $record['pauseHeaderObserved'] = $requestHeaders.ContainsKey('X-MCP-Pause-Forward') -and $requestHeaders['X-MCP-Pause-Forward'] -ceq 'active'
             }
@@ -790,14 +793,17 @@ try {
                         contentLengthMatchesBody = ($contentLength -eq $bodyBytes.Length -and $totalRead -eq $contentLength)
                     }) -Compress -Depth 3
                 }
-                '/test-method' {
+                { $_ -eq '/test-method' -or $_ -ceq '/test-post-phase2' } {
                     $contentType = 'application/json; charset=utf-8'
-                    $responseBody = ConvertTo-Json -InputObject ([ordered]@{
-                        path = '/test-method'
-                        method = $method
-                        bodyByteLength = $bodyBytes.Length
-                        bodySha256 = (Get-TestSha256 -Bytes $bodyBytes)
-                    }) -Compress -Depth 3
+                    try {
+                        $responseBody = ConvertTo-Json -InputObject (New-TestMethodFixtureResponse `
+                            -Path $path -Method $method -BodyBytes $bodyBytes `
+                            -BodySha256 (Get-TestSha256 -Bytes $bodyBytes) -RuleEngineTestMode ([bool]$RuleEngineTestMode) `
+                            -ContentType $requestHeaders['Content-Type'] -TestId $requestHeaders['X-MCP-Test-ID']) -Compress -Depth 8
+                    } catch {
+                        $status = '400 Bad Request'
+                        $responseBody = 'Invalid synthetic method-fixture request.'
+                    }
                 }
                 '/test-headers' {
                     $extraHeaders += 'X-MCP-Test-Origin: loopback'

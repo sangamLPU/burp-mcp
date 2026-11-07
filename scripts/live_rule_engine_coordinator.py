@@ -13,6 +13,7 @@ import os
 import queue
 import socket
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -22,9 +23,10 @@ import cancel_test_preflight as preflight
 
 
 TARGET_URL = "http://127.0.0.1:8000/test-post"
+TARGET_SESSION_URL = "http://127.0.0.1:8000/test-post-phase2"
 PROXY_HOST = "127.0.0.1"
 PROXY_PORT = 8080
-EXPECTED_BUILD_ID = "20261106.1-connection-origin-dev"
+EXPECTED_BUILD_ID = "20261107.3-scanner-permission-hardening-dev"
 SESSION_LIFETIME_SECONDS = 60
 RULE_TTL_SECONDS = 60
 SESSION_SAFETY_MARGIN_MS = 30_000
@@ -48,6 +50,20 @@ RULE_NAMES = (
 CORE_ACTIVE_RULES = frozenset((REQUEST_RULE, RESPONSE_RULE, HEADER_RULE))
 
 
+def build_target_session_rule_specs(grant_id: str) -> list[dict]:
+    """Prepare exactly two target-session rules; this function performs no MCP calls."""
+    request, response, header, *_ = build_rule_specs(grant_id, duration_seconds=120)
+    request["transformations"].extend(header["transformations"])
+    for spec in (request, response):
+        spec["targetUrl"] = TARGET_SESSION_URL
+        spec["conditions"]["path"] = "/test-post-phase2"
+        # Keep both rules ACTIVE through response association for the third POST.
+        # The client batch, not rule exhaustion, enforces the three-attempt limit.
+        spec["maximumMatches"] = 4
+        spec["maximumModifications"] = 4
+    return [request, response]
+
+
 class CoordinatorError(RuntimeError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
@@ -58,6 +74,188 @@ class WaitingForApproval(CoordinatorError):
     def __init__(self, message: str, pending_responses: int):
         super().__init__("WAITING_FOR_APPROVAL", message)
         self.pending_responses = pending_responses
+
+
+class TargetSessionExchangeBatch:
+    """One explicit baseline plus two concurrent clients; never creates authorization.
+
+    The caller supplies current-session readiness, a one-shot sender, exact origin
+    lookup and durable sanitized evidence storage. No work happens on construction.
+    Cleanup remains with the supervisor: this runner never drops held traffic.
+    """
+
+    def __init__(self, sender, readiness, origin_records, evidence_sink):
+        self.sender, self.readiness = sender, readiness
+        self.origin_records, self.evidence_sink = origin_records, evidence_sink
+        self.attempts = 0
+        self.used = False
+        self.stopped = False
+        self.lock = threading.Lock()
+
+    def _exchange(self, case_id):
+        with self.lock:
+            if self.stopped or self.attempts >= 3:
+                raise CoordinatorError("BATCH_STOPPED", "no further client attempts are permitted")
+            if self.readiness() is not True:
+                self.stopped = True
+                raise CoordinatorError("READINESS_FAILED", "current approved target session was not confirmed")
+            self.attempts += 1
+        record = {"case": case_id, "state": "STARTED", "target": TARGET_SESSION_URL}
+        self.evidence_sink(record.copy())
+        try:
+            result = self.sender(case_id)
+            # Preserve bounded terminal metadata even when validation fails. Never
+            # persist arbitrary response bodies or exception strings.
+            record['clientStatus'] = result.get('status') if isinstance(result, dict) and type(result.get('status')) is int else None
+            digest = result.get('responseSha256') if isinstance(result, dict) else None
+            if isinstance(digest, str) and len(digest) == 64 and all(c in '0123456789abcdef' for c in digest):
+                record['responseSha256'] = digest
+            body = result.get("body") if isinstance(result, dict) else None
+            origins = self.origin_records(case_id)
+            if (not isinstance(body, dict) or type(result.get("status")) is not int or result["status"] != 200 or
+                    not isinstance(origins, list) or len(origins) != 1 or not isinstance(origins[0], dict)):
+                raise CoordinatorError("EXCHANGE_MISMATCH", "bounded HTTP result and one origin record required")
+            origin = origins[0]
+            expected = {"case": case_id, "enabled": True, "name": "original", "mcp_test": "after",
+                        "marker": "preserve", "nested": {"keep": 17}, "method": "POST", "path": "/test-post-phase2"}
+            if (any(body.get(k) != v for k, v in expected.items()) or body.get("enabled") is not True or
+                    origin.get("ruleTestId") != case_id or origin.get("path") != "/test-post-phase2" or
+                    origin.get("postEnabled") is not True or origin.get("ruleTestHeaderObserved") is not True or
+                    origin.get("bodyFramingVerified") is not True or origin.get("utf8BodyValid") is not True or
+                    body.get("bodySha256") != origin.get("bodySha256") or
+                    body.get("bodyByteLength") != origin.get("bodyByteLength") or
+                    not isinstance(body.get("bodySha256"), str) or len(body["bodySha256"]) != 64 or
+                    any(c not in "0123456789abcdef" for c in body["bodySha256"])):
+                raise CoordinatorError("EXCHANGE_MISMATCH", "client and independent origin evidence disagree")
+            record.update(state="PASS", status=200, originDeliveryCount=1,
+                          receivedBodySha256=body["bodySha256"])
+            self.evidence_sink(record.copy())
+            return record
+        except Exception as error:
+            with self.lock:
+                self.stopped = True
+            record.update(state="FAIL", code=getattr(error, "code", type(error).__name__))
+            self.evidence_sink(record.copy())
+            raise
+
+    def run(self, case_ids):
+        import re
+        if (self.used or not isinstance(case_ids, (list, tuple)) or len(case_ids) != 3 or
+                any(not isinstance(c, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", c) for c in case_ids)):
+            raise CoordinatorError("INVALID_BATCH", "one batch of three unique bounded case IDs is required")
+        if len(set(case_ids)) != 3:
+            raise CoordinatorError("INVALID_BATCH", "case IDs must be unique")
+        self.used = True
+        results = [self._exchange(case_ids[0])]
+        barrier = threading.Barrier(2)
+        outcomes = queue.Queue()
+
+        def worker(case_id):
+            try:
+                barrier.wait(timeout=5)
+                outcomes.put((True, self._exchange(case_id)))
+            except Exception as error:
+                outcomes.put((False, error))
+
+        workers = [threading.Thread(target=worker, args=(c,), daemon=True) for c in case_ids[1:]]
+        for worker_thread in workers:
+            worker_thread.start()
+        # Sender must use the existing bounded client timeout; no retry or second batch.
+        for worker_thread in workers:
+            worker_thread.join(CLIENT_TIMEOUT_SECONDS + 5)
+        if any(worker_thread.is_alive() for worker_thread in workers):
+            self.stopped = True
+            raise CoordinatorError("CLIENT_OUTCOME_UNKNOWN", "a bounded client remains unresolved; do not retry")
+        for _ in workers:
+            success, outcome = outcomes.get_nowait()
+            if not success:
+                raise outcome
+            results.append(outcome)
+        return results
+
+
+def require_target_session_readiness(client, grant_id, expected_rules, owned_rule_ids):
+    """Read-only per-attempt gate after native approval; no permission is created.
+
+    expected_rules maps the two approved IDs to immutable prepared specifications.
+    Numeric authorization revisions remain server-private and are not invented.
+    """
+    if (not isinstance(expected_rules, dict) or len(expected_rules) != 2 or
+            set(expected_rules) - set(owned_rule_ids) or not all(expected_rules)):
+        raise CoordinatorError('READINESS_FAILED', 'exactly two owned approved rule references required')
+    try:
+        if str(uuid.UUID(grant_id)) != grant_id:
+            raise ValueError()
+    except (ValueError, TypeError, AttributeError):
+        raise CoordinatorError('READINESS_FAILED', 'canonical grant reference required') from None
+    if sorted(expected_rules.values(), key=lambda s: s.get('name', '')) != sorted(build_target_session_rule_specs(grant_id), key=lambda s: s['name']):
+        raise CoordinatorError('READINESS_FAILED', 'prepared specifications do not match the fixed Phase 2 plan')
+    status = client.tool('burp_get_intercept_status', includeDiagnostics=False)
+    grants = client.tool('burp_list_target_rule_authorizations', includeDiagnostics=False)
+    rules = client.tool('burp_list_interception_rules', includeDiagnostics=False)
+    engine = client.tool('burp_get_rule_engine_status', includeDiagnostics=False)
+    if (not isinstance(status, dict) or not isinstance(engine, dict) or
+            any(type(status.get(k)) is not int for k in ('sessionLifetimeSeconds', 'sessionRemainingMillis', 'pendingRequests', 'pendingResponses')) or
+            any(type(engine.get(k)) is not int for k in ('configuredRules', 'enabledRules'))):
+        raise CoordinatorError('READINESS_FAILED', 'integer session and queue evidence required')
+    if (status.get('enabled') is not True or status.get('editsEnabled') is not True or
+            status.get('heartbeatHealth') != 'HEALTHY' or status.get('sessionLifetimeSeconds') != 120 or
+            status.get('sessionRemainingMillis', 0) < 30_000 or status.get('unattendedMode', {}).get('active') is not False or
+            status.get('pendingRequests') != 0 or status.get('pendingResponses') != 0):
+        raise CoordinatorError('READINESS_FAILED', 'healthy bounded target session with empty queues required')
+    if (not isinstance(grants, list) or len(grants) != 1 or grants[0].get('id') != grant_id or
+            grants[0].get('urls') != [TARGET_SESSION_URL] or grants[0].get('remainingMillis', 0) < 30_000):
+        raise CoordinatorError('READINESS_FAILED', 'exact live preparation grant and lifetime required')
+    if (not isinstance(rules, list) or {r.get('id') for r in rules} != set(owned_rule_ids) or
+            len(rules) != len(set(owned_rule_ids)) or engine.get('configuredRules') != len(rules) or
+            engine.get('enabledRules') != 2 or engine.get('emergencyStopped') is not False):
+        raise CoordinatorError('READINESS_FAILED', 'only owned rules and two active approved rules required')
+    defaults = dict(action='MODIFY_AND_FORWARD', priority=100, maximumMatches=32,
+                    maximumModifications=32, durationSeconds=120, conditions={}, transformations=[])
+    for rule in rules:
+        if rule['id'] in expected_rules:
+            if rule.get('state') != 'ACTIVE' or {**defaults, **rule.get('spec', {})} != expected_rules[rule['id']]:
+                raise CoordinatorError('READINESS_FAILED', 'approved rule specification or state changed')
+        elif rule.get('state') not in ('DISABLED', 'PAUSED'):
+            raise CoordinatorError('READINESS_FAILED', 'unbound control rule became executable')
+    return True
+
+
+def target_session_preflight(client):
+    """Read-only setup gate; never starts a fixture, grant, rule or session."""
+    snapshot = LiveRuleEngineCoordinator._snapshot(client)
+    status, engine, server = snapshot['interception'], snapshot['engine'], snapshot['server']
+    tools = client.rpc('tools/list', {})
+    catalog = tools.get('tools') if isinstance(tools, dict) else None
+    scope = client.tool('burp_get_scope', urls=[TARGET_SESSION_URL, 'http://127.0.0.1:8000/', 'https://example.com/'])
+    grants = client.tool('burp_list_target_rule_authorizations', includeDiagnostics=False)
+    failures = []
+    if (snapshot['connection'].get('burpConnected') is not True or
+            not str(snapshot['connection'].get('burpVersion', '')).startswith(preflight.EXPECTED_BURP_VERSION_PREFIX)):
+        failures.append('expected connected Burp Professional 2024.1.1.1 required')
+    if (server.get('extensionVersion') != '1.5.0-dev.6' or server.get('buildId') != EXPECTED_BUILD_ID or
+            server.get('serverState') != 'running' or server.get('bearerAuthenticationRequired') is not True or
+            server.get('readOnlyMode') is not False or server.get('authorizedTargetCount') != 1):
+        failures.append('expected authenticated development runtime and original single host allowlist required')
+    if (not isinstance(catalog, list) or len(catalog) != 89 or
+            len({t.get('name') for t in catalog if isinstance(t, dict)}) != 89 or tools.get('nextCursor')):
+        failures.append('complete 89-tool catalog required')
+    if (status.get('enabled') is not False or status.get('unattendedMode', {}).get('active') is not False or
+            status.get('editsEnabled') is not True or status.get('pendingRequests') != 0 or status.get('pendingResponses') != 0 or
+            snapshot['requests'] != [] or snapshot['responses'] != [] or snapshot['rules'] != [] or grants != [] or
+            engine.get('configuredRules') != 0 or engine.get('enabledRules') != 0 or engine.get('emergencyStopped') is not False):
+        failures.append('clean inactive runtime with edits enabled required')
+    if {c.get('url') for c in scope.get('checks', []) if c.get('eligible') is True} != {TARGET_SESSION_URL}:
+        failures.append('exact new fixture must be eligible; root and external controls excluded')
+    if {c.get('url') for c in snapshot['scope'].get('checks', []) if c.get('eligible') is True} != set(preflight.LOCAL_TEST_URLS):
+        failures.append('original nine fixture scope checks changed')
+    if failures:
+        raise CoordinatorError('PREFLIGHT_FAILED', '; '.join(failures))
+    preflight.check_proxy_listener()  # TCP availability only; no HTTP request.
+    return {'state': 'PASS', 'buildId': EXPECTED_BUILD_ID, 'toolCount': 89,
+            'target': TARGET_SESSION_URL, 'applicationTrafficStarted': False,
+            'nativeInterceptState': 'requires separate supported confirmation',
+            'projectIdentity': 'requires operator confirmation of normal project'}
 
 
 def build_rule_specs(authorization_reference: str, duration_seconds: int = RULE_TTL_SECONDS) -> list[dict]:
@@ -433,24 +631,30 @@ class LiveRuleEngineCoordinator:
 
     @staticmethod
     def _http_post(case_id: str, run_id: str, server_identity: str, *, rule_header=False, pause_header=False,
-                   timeout=CLIENT_TIMEOUT_SECONDS) -> dict:
+                   timeout=CLIENT_TIMEOUT_SECONDS, target_url=TARGET_URL) -> dict:
+        if target_url not in (TARGET_URL, TARGET_SESSION_URL):
+            raise CoordinatorError("UNAPPROVED_CLIENT_TARGET", "client target is outside the two fixed fixture URLs")
         body_object = {"enabled": False, "name": "original", "mcp_test": "after", "marker": "preserve",
                        "case": case_id, "nested": {"keep": 17}}
         body = json.dumps(body_object, separators=(",", ":")).encode("utf-8")
         headers = {
             "Host": "127.0.0.1:8000", "Content-Type": "application/json", "Accept": "application/json",
-            "Connection": "close", "X-MCP-Test-Run": run_id, "X-MCP-Server-Identity": server_identity,
+            "Connection": "close",
             "X-MCP-Test-ID": case_id,
         }
+        if target_url == TARGET_URL:
+            headers.update({"X-MCP-Test-Run": run_id, "X-MCP-Server-Identity": server_identity})
         if rule_header:
             headers["X-MCP-Rule-Test-Eligible"] = "active"
         if pause_header:
             headers["X-MCP-Pause-Forward"] = "active"
         connection = http.client.HTTPConnection(PROXY_HOST, PROXY_PORT, timeout=timeout)
         try:
-            connection.request("POST", TARGET_URL, body=body, headers=headers)
+            connection.request("POST", target_url, body=body, headers=headers)
             response = connection.getresponse()
-            response_bytes = response.read()
+            response_bytes = response.read(65537) if target_url == TARGET_SESSION_URL else response.read()
+            if target_url == TARGET_SESSION_URL and len(response_bytes) > 65536:
+                raise CoordinatorError("CLIENT_RESPONSE_TOO_LARGE", "target fixture response exceeded 64 KiB")
             response_headers = {name.lower(): value for name, value in response.getheaders()}
             parsed = json.loads(response_bytes.decode("utf-8"))
             return {
@@ -716,10 +920,16 @@ class LiveRuleEngineCoordinator:
         return f"rule-{uuid.uuid4().hex}-{suffix}"
 
 
-def main() -> int:
+def main(argv=None) -> int:
     coordinator = None
     try:
+        args = list(sys.argv[1:] if argv is None else argv)
+        if args not in ([], ['--target-preflight-only']):
+            raise CoordinatorError('INVALID_ARGUMENTS', 'unsupported invocation; no session or traffic started')
         client = preflight.initialize()
+        if args == ['--target-preflight-only']:
+            print(json.dumps(target_session_preflight(client), separators=(',', ':')))
+            return 0
         coordinator = LiveRuleEngineCoordinator(client)
         result = coordinator.run()
         print(json.dumps(result, separators=(",", ":")))

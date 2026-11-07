@@ -271,7 +271,7 @@ class McpClient:
             connection.request("POST", MCP_PATH, json.dumps(message), headers)
             response = connection.getresponse()
             self._session_id = response.getheader("Mcp-Session-Id") or self._session_id
-            content_type = response.getheader("Content-Type", "")
+            content_type = response.getheader("Content-Type", "").split(";", 1)[0].strip().lower()
             if response.status == 401:
                 raise PreflightError(
                     "MCP authentication rejected BURP_MCP_TOKEN (HTTP 401); refresh it from Burp's Security tab"
@@ -283,10 +283,10 @@ class McpClient:
             if notification:
                 return None
 
-            if "text/event-stream" in content_type.lower():
+            if content_type == "text/event-stream":
                 payload = self._read_sse_result(response, message.get("id"), method)
             else:
-                if "application/json" not in content_type.lower():
+                if content_type != "application/json":
                     raise PreflightError(f"MCP {method} returned an unexpected content type")
                 body = response.read(MAX_MCP_RESPONSE_BYTES + 1)
                 if len(body) > MAX_MCP_RESPONSE_BYTES:
@@ -300,7 +300,7 @@ class McpClient:
 
             if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
                 raise PreflightError(f"MCP {method} returned a malformed JSON-RPC response")
-            if payload.get("id") != message.get("id"):
+            if type(payload.get("id")) is not type(message.get("id")) or payload.get("id") != message.get("id"):
                 raise PreflightError(f"MCP {method} returned a mismatched response ID")
             if "error" in payload:
                 error = payload.get("error")
@@ -352,20 +352,27 @@ class McpClient:
 
     def tool(self, name, **arguments):
         result = self.rpc("tools/call", {"name": name, "arguments": arguments})
-        if not isinstance(result, dict) or result.get("isError") is True:
+        if (not isinstance(result, dict) or result.get("isError", False) is not False or
+                "result" in result or "error" in result):
             raise PreflightError(f"Authenticated MCP status call failed: {name}")
-        structured = result.get("structuredContent")
-        if isinstance(structured, (dict, list)):
-            return structured
-        text_blocks = [
-            item.get("text", "")
-            for item in result.get("content", [])
-            if isinstance(item, dict) and item.get("type") == "text"
-        ]
+        # These Burp handlers return JSON in TextContent, not structured output.
+        # Never let an alternate payload conceal missing/denied text evidence.
+        if "structuredContent" in result:
+            raise PreflightError(f"MCP {name} returned an unexpected structured result")
+        content = result.get("content")
+        if (not isinstance(content, list) or not content or any(
+                not isinstance(item, dict) or item.get("type") != "text" or
+                not isinstance(item.get("text"), str) or not item["text"].strip()
+                for item in content)):
+            raise PreflightError(f"MCP {name} returned an unreadable result")
+        text_blocks = [item["text"] for item in content]
         try:
-            return json.loads("\n".join(text_blocks))
+            decoded = json.loads("\n".join(text_blocks))
         except json.JSONDecodeError as error:
             raise PreflightError(f"MCP {name} returned an unreadable result") from error
+        if not isinstance(decoded, (dict, list)):
+            raise PreflightError(f"MCP {name} returned an unexpected scalar result")
+        return decoded
 
 
 def read_mcp_snapshot(client):

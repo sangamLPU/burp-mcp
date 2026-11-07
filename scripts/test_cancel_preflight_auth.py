@@ -39,6 +39,33 @@ class FakeResponse:
         return next(self.lines, b"")
 
 
+class MalformedToolEnvelopeTests(unittest.TestCase):
+    def test_unexpected_structured_or_conflicting_content_is_not_status_evidence(self):
+        client = McpClient()
+        for result in ({"structuredContent": {"enabled": True}},
+                       {"content": [], "structuredContent": {"enabled": True}},
+                       {"content": [{"type": "text", "text": "Approval required."}], "structuredContent": {"enabled": True}},
+                       {"content": [{"type": "text", "text": "true"}]},
+                       {"content": [{"type": "text", "text": "null"}]}):
+            with self.subTest(result=result), patch.object(client, "rpc", return_value=result), self.assertRaises(PreflightError):
+                client.tool("burp_get_intercept_status")
+
+    def test_invalid_error_flags_and_wrapped_results_are_rejected(self):
+        client = McpClient()
+        for result in ({"isError": "true", "structuredContent": {"enabled": True}},
+                       {"isError": 0, "structuredContent": {"enabled": True}},
+                       {"result": {}, "structuredContent": {"enabled": True}},
+                       {"error": {"code": 1}, "structuredContent": {"enabled": True}}):
+            with self.subTest(result=result), patch.object(client, "rpc", return_value=result), self.assertRaises(PreflightError):
+                client.tool("burp_get_intercept_status")
+
+    def test_malformed_content_cannot_return_a_status(self):
+        client = McpClient()
+        for content in (None, {}, [], [{}], [{"type": "text", "text": 3}]):
+            with self.subTest(content=content), patch.object(client, "rpc", return_value={"content": content}), self.assertRaises(PreflightError):
+                client.tool("burp_get_intercept_status")
+
+
 class FakeConnection:
     def __init__(self, response=None, request_error=None, response_error=None):
         self.response = response or FakeResponse(payload={"jsonrpc": "2.0", "id": 1, "result": {"ok": True}})
@@ -64,6 +91,21 @@ class FakeConnection:
 
 
 class AuthenticationPreflightTests(unittest.TestCase):
+    def test_boolean_rpc_id_cannot_match_integer_request_id(self):
+        connection = FakeConnection(FakeResponse(payload={"jsonrpc": "2.0", "id": True, "result": {"ok": True}}))
+        with patch.dict(os.environ, {"BURP_MCP_TOKEN": FAKE_TOKEN}, clear=True):
+            with self.assertRaises(PreflightError):
+                self.client(lambda *_a, **_k: connection).rpc("initialize")
+        self.assertTrue(connection.closed)
+
+    def test_content_type_substrings_are_not_json_or_event_stream(self):
+        for media_type in ("application/jsonish", "text/plain; note=application/json", "text/event-streamish"):
+            connection = FakeConnection(FakeResponse(content_type=media_type, payload={"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}))
+            with self.subTest(media_type=media_type), patch.dict(os.environ, {"BURP_MCP_TOKEN": FAKE_TOKEN}, clear=True):
+                with self.assertRaisesRegex(PreflightError, "unexpected content type"):
+                    self.client(lambda *_a, **_k: connection).rpc("initialize")
+            self.assertTrue(connection.closed)
+
     def client(self, factory):
         return McpClient(connection_factory=factory)
 

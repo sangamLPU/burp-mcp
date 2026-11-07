@@ -7,6 +7,30 @@ import java.util.Base64
 
 class SafeContentTest {
     @Test
+    fun `response status text does not bypass credential redaction`() {
+        val response = io.mockk.mockk<burp.api.montoya.http.message.responses.HttpResponse>(relaxed = true)
+        io.mockk.every { response.httpVersion() } returns "HTTP/1.1"
+        io.mockk.every { response.statusCode() } returns 200.toShort()
+        io.mockk.every { response.reasonPhrase() } returns "OK password=fake-status-secret"
+        io.mockk.every { response.headers() } returns emptyList()
+        io.mockk.every { response.body().length() } returns 0
+        val text = SafeContent.render(response)
+        assertFalse(text.contains("fake-status-secret"))
+        assertTrue(text.contains("HTTP/1.1 200 OK"))
+    }
+
+    @Test
+    fun `URL redaction protects encoded query keys and literal prefix or fragment secrets`() {
+        for (url in listOf("http://fixture.invalid/?p%61ssword=fake-secret",
+                "http://fixture.invalid/password=fake-secret?keep=yes",
+                "http://fixture.invalid/?keep=yes#password=fake-secret")) {
+            val rendered = SafeContent.redactHeader("Location", url)
+            assertFalse(rendered.contains("fake-secret"))
+            assertTrue(rendered.contains("[REDACTED]"))
+        }
+    }
+
+    @Test
     fun `raw HTTP rendering redacts secrets and marks captured text untrusted`() {
         val jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue123"
         val raw = """GET /?access_token=url-secret HTTP/1.1
