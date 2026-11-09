@@ -1,9 +1,130 @@
 # Development checkpoint on 7 November 2026
 
-**Development paused at v1.5.0-dev.6. This is neither a release candidate nor a
+**Development is at the v1.5.0-dev.7 packaging checkpoint. This is neither a release candidate nor a
 stable v1.5.0 release.** The feature set is frozen. v1.4.0 remains the verified
 rollback release. Start with [agent setup](AGENT_SETUP.md); remaining supervised
 work is summarized in [the campaign plan](SUPERVISED_CAMPAIGN.md).
+
+## dev.7 supervised browser case: 9 November 2026
+
+**LIVE VERIFIED for one synthetic exact-target case.** A separately authorized
+single browser POST to `/test-form-browser-validation` passed through Burp's
+built-in Chromium. The human reported one click and supplied the browser JSON;
+the independent origin logged one delivery and verified the modified form and
+framing. Both rules recorded exactly one match, modification and forward, with
+the same request/response message ID. The request exhausted its one-match budget
+before the associated response was modified. The origin's `serverVerified` and
+the added `browser_verified` were both true in the user-reported response. This
+verifies the dev.7 final-budget association correction for that one case only.
+
+The browser's raw original request was not separately exported from history;
+its original marker is supported by the prepared form and the request rule's
+match condition. Cleanup verified no remaining grants, session, rules, held
+messages or fixture listener; unattended mode inactive, Emergency Stop clear and
+native Proxy Intercept OFF. Local-only evidence is under
+`build/reports/dev7-supervised-20261109T075819Z/`. The other supervised campaign
+and native Scanner denial-attribution gates remain open. This is not a release
+candidate or general validation of arbitrary sites, credentials or body formats.
+
+## dev.7 runtime preflight: 9 November 2026
+
+The human loaded dev.7 and enabled edit proposals. Current read-only observations
+confirm one loaded MCP extension at the qualified JAR path, runtime build
+`20261109.1-rule-association-fix-dev`, authenticated initialization, 89 unique
+tools, original nine enabled scope prefixes and sole localhost allowlist entry.
+Native Proxy Intercept is OFF; required approvals/filtering and bearer authentication
+are ON, and persistent Always Allow exceptions are OFF. Managed interception and
+unattended mode are inactive; no grants, rules or queued messages; Emergency Stop
+clear. The documented non-traffic preflight returned PASS, exit 0, with no
+application traffic. Its full sanitized result is in ignored report
+`build/reports/dev7-runtime-preflight-20261109T061603Z/`.
+
+The dedicated browser profile remains uncreated/unverified and actual proxy
+traffic is unproven. The isolated demo remains inert. A separately authorized
+exact one-POST plan and fresh native grant/session decisions are required. No
+dev.7 live transformation or Scanner decision has been tested by this preflight.
+
+## dev.7 packaging addendum: 9 November 2026
+
+The corrected source is packaged as **1.5.0-dev.7**,
+`20261109.1-rule-association-fix-dev`, at
+`build/dev-v1.5.0/libs/burp-mcp-1.5.0-dev.7-all.jar`, SHA-256
+`c2a0acb4d6e149c6df1056e5287fe3335583ac291f38c138a436cf649f46a26e`.
+It is a development checkpoint, not a release. At packaging time the running
+instance was still dev.6; see the newer runtime preflight above. Strict coordinator
+identity checks now require dev.7 and reject dev.6; do not run traffic-producing
+coordinator modes. After reload and human-enabled live edits, run only the
+documented `--target-preflight-only` and record its actual result. This gate now
+checks the revised browser-demo URL as well as the existing Phase 2 target.
+
+Gradle development packaging and 109 focused JVM checks passed, including the
+two Scanner listing permission tests. A subsequent 31-case target-session run
+passed including the exact proposed form pair; catalog integration verified 89
+unique names. These runs overlap and must not be summed. Python coordinator tests
+(33), 15 pure fixture assertions and seven pure proposed-fixture cases passed.
+ZIP integrity, manifest, 742 project class headers/Java 17 bytecode and matching
+compiled classes passed; six Scanner-named classes match dev.6 byte-for-byte.
+These checks do not prove live behavior or resolve the historical native Scanner
+decision-attribution gap. dev.6, stable v1.4.0 and historical evidence are retained.
+
+The exact `/test-form-browser-validation` proposal and isolated fixture remain
+disabled/prepared; no fixture, browser, grant, session or application request was
+started. Corrected runtime identity, security, scope, allowlist, queues and native
+Proxy Intercept must be observed after human replacement. Live edits require the
+human's separate local checkbox action. Browser routing and actual traffic remain
+unverified. See [browser/Burp workflow](BROWSER_BURP_WORKFLOW.md).
+
+## Recovery addendum: 9 November 2026
+
+The following describes the earlier recovery state before dev.7 packaging above.
+
+Repository recovery started clean on `dev/v1.5.0` at
+`e86eeca7920395a4df4e7bd760e97be274c83e64`. No commit, push, reload or packaging
+was performed. Runtime remains the qualified dev.6 build; its and stable v1.4.0's
+artifact hashes are unchanged. See [browser/Burp workflow](BROWSER_BURP_WORKFLOW.md)
+for current native/MCP observations, manual browsing and browser-controller recovery.
+
+Restored nine-prefix scope and exact localhost allowlist are verified. Native
+security controls are observed enabled, persistent exceptions unchecked, native
+Proxy Intercept OFF and Temporary Project selected. Windows native Computer Use
+works; browser access host remains unavailable. Effective dedicated-browser proxy
+routing and future HTTPS trust remain unverified. No application traffic occurred.
+The documented non-traffic preflight exits 2 because live edits remain OFF; no
+permission setting was changed. A PASS would not validate the original demo plan.
+
+Two additional preparation findings must survive handoff:
+
+- The original `/test-form` demo incorrectly uses target preparation/session
+  authority for a reserved legacy localhost rule target. Its rule creation and
+  session path reject this with unattended mode inactive. Keep the original page
+  disabled and specs inert; revise the plan rather than bypassing that restriction.
+  An isolated, disabled proposal at `/test-form-browser-validation` with matching
+  copied fixture and review-only browser launch description is prepared privately;
+  fixture syntax/seven pure form cases/origin JSON schema checks pass, but this
+  proposal is not approved, launched or browser/traffic verified.
+- A focused synthetic regression reproduced a product defect: request-rule budget
+  exhaustion removes its revision from the response association's ACTIVE-only
+  snapshot, skipping a separately authorized paired response. The working-tree
+  source correction retains MAX_MATCHES/MAX_MODIFICATIONS rules in association
+  identity only, keeps evaluation and budgets unchanged, and checks original
+  revisions again at final release. This correction is **not in the loaded JAR**.
+
+Final affected source validation passed 107 JVM tests across BuildInfo,
+InterceptionRuleEngine, LiveInterception, TargetLiveSession, TargetRuleAuthorization
+and UnattendedLocalTestMode; 33 coordinator tests and 15 pure fixture assertions
+also passed. Seven new target-session cases cover prefix isolation, reserved-path
+dispatch, one-budget pairs, repeated pairs, modification-budget exhaustion,
+pause/delete of exhausted rules and pause/resume during response materialization.
+The failing one-budget reproduction and before/after reports are preserved in a
+new ignored recovery evidence directory. These results do not supersede historical
+live verification or resolve the native Scanner-denial evidence gap.
+
+A new unique development artifact was required to deploy the source fix; dev.7
+has now been prepared as described above, and reviewed reload remains required.
+Do not silently overwrite the qualified dev.6 JAR or adjust strict
+preflight identity checks to conceal a source/runtime mismatch. Demonstration
+readiness remains BLOCKED pending a valid revised exact test plan, live-edit
+approval/configuration, dedicated browser routing and deployment of the correction.
 
 ## Source and artifact identity
 

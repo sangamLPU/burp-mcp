@@ -5,6 +5,14 @@ limits, see [v1.5.0 verification](V1_5_0_VERIFICATION.md). The unattended workfl
 below describes the separate legacy nine-path policy, which cannot approve target
 grant/session prompts.
 
+For practical manual/automated browsing, independent edit controls and current
+recovery limitations, read [browser/Burp workflow](BROWSER_BURP_WORKFLOW.md).
+The legacy queue behavior below must not be applied to target sessions: unsupported,
+conflicted or unauthorized target-session traffic continues unchanged without
+entering the manual queue. Target sessions reject DROP and still require exact
+grant/session binding. The original nine localhost rule targets cannot use target
+grants instead of their separate unattended authority.
+
 ## What it does
 
 The rule engine runs inside the existing `LiveInterception` Proxy request and response callbacks. It evaluates bounded rules against each held message before the existing callback releases it. A matching rule does not make a network decision by itself: the exact message still has to pass the current Burp scope, explicit MCP allowlist, identity, revision, heartbeat, session, and unattended-policy checks. The existing decision queue remains the source of message IDs, revisions, deadlines, one-time approval, and final release.

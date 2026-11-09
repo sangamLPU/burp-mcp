@@ -4,9 +4,9 @@ import java.util.jar.Manifest
 
 /** Build identity compiled into the extension and exposed through existing MCP status tools. */
 internal object BuildInfo {
-    const val version: String = "1.5.0-dev.6"
-    const val buildId: String = "20261107.3-scanner-permission-hardening-dev"
-    const val serverVersion: String = "1.5.0-dev.6+20261107.3-scanner-permission-hardening-dev"
+    const val version: String = "1.5.0-dev.7"
+    const val buildId: String = "20261109.1-rule-association-fix-dev"
+    const val serverVersion: String = "1.5.0-dev.7+20261109.1-rule-association-fix-dev"
 
     /** Checks packaging metadata without using it as the runtime source of identity. */
     fun matchesManifest(manifest: Manifest?): Boolean {

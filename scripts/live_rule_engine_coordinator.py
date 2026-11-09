@@ -24,9 +24,11 @@ import cancel_test_preflight as preflight
 
 TARGET_URL = "http://127.0.0.1:8000/test-post"
 TARGET_SESSION_URL = "http://127.0.0.1:8000/test-post-phase2"
+BROWSER_DEMO_URL = "http://127.0.0.1:8000/test-form-browser-validation"
 PROXY_HOST = "127.0.0.1"
 PROXY_PORT = 8080
-EXPECTED_BUILD_ID = "20261107.3-scanner-permission-hardening-dev"
+EXPECTED_BUILD_ID = "20261109.1-rule-association-fix-dev"
+EXPECTED_EXTENSION_VERSION = "1.5.0-dev.7"
 SESSION_LIFETIME_SECONDS = 60
 RULE_TTL_SECONDS = 60
 SESSION_SAFETY_MARGIN_MS = 30_000
@@ -227,13 +229,13 @@ def target_session_preflight(client):
     status, engine, server = snapshot['interception'], snapshot['engine'], snapshot['server']
     tools = client.rpc('tools/list', {})
     catalog = tools.get('tools') if isinstance(tools, dict) else None
-    scope = client.tool('burp_get_scope', urls=[TARGET_SESSION_URL, 'http://127.0.0.1:8000/', 'https://example.com/'])
+    scope = client.tool('burp_get_scope', urls=[TARGET_SESSION_URL, BROWSER_DEMO_URL, 'http://127.0.0.1:8000/', 'https://example.com/'])
     grants = client.tool('burp_list_target_rule_authorizations', includeDiagnostics=False)
     failures = []
     if (snapshot['connection'].get('burpConnected') is not True or
             not str(snapshot['connection'].get('burpVersion', '')).startswith(preflight.EXPECTED_BURP_VERSION_PREFIX)):
         failures.append('expected connected Burp Professional 2024.1.1.1 required')
-    if (server.get('extensionVersion') != '1.5.0-dev.6' or server.get('buildId') != EXPECTED_BUILD_ID or
+    if (server.get('extensionVersion') != EXPECTED_EXTENSION_VERSION or server.get('buildId') != EXPECTED_BUILD_ID or
             server.get('serverState') != 'running' or server.get('bearerAuthenticationRequired') is not True or
             server.get('readOnlyMode') is not False or server.get('authorizedTargetCount') != 1):
         failures.append('expected authenticated development runtime and original single host allowlist required')
@@ -245,15 +247,15 @@ def target_session_preflight(client):
             snapshot['requests'] != [] or snapshot['responses'] != [] or snapshot['rules'] != [] or grants != [] or
             engine.get('configuredRules') != 0 or engine.get('enabledRules') != 0 or engine.get('emergencyStopped') is not False):
         failures.append('clean inactive runtime with edits enabled required')
-    if {c.get('url') for c in scope.get('checks', []) if c.get('eligible') is True} != {TARGET_SESSION_URL}:
-        failures.append('exact new fixture must be eligible; root and external controls excluded')
+    if {c.get('url') for c in scope.get('checks', []) if c.get('eligible') is True} != {TARGET_SESSION_URL, BROWSER_DEMO_URL}:
+        failures.append('both exact fixtures must be eligible; root and external controls excluded')
     if {c.get('url') for c in snapshot['scope'].get('checks', []) if c.get('eligible') is True} != set(preflight.LOCAL_TEST_URLS):
         failures.append('original nine fixture scope checks changed')
     if failures:
         raise CoordinatorError('PREFLIGHT_FAILED', '; '.join(failures))
     preflight.check_proxy_listener()  # TCP availability only; no HTTP request.
     return {'state': 'PASS', 'buildId': EXPECTED_BUILD_ID, 'toolCount': 89,
-            'target': TARGET_SESSION_URL, 'applicationTrafficStarted': False,
+            'target': TARGET_SESSION_URL, 'browserDemoTarget': BROWSER_DEMO_URL, 'applicationTrafficStarted': False,
             'nativeInterceptState': 'requires separate supported confirmation',
             'projectIdentity': 'requires operator confirmation of normal project'}
 

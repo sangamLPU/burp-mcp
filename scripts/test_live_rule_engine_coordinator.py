@@ -129,7 +129,7 @@ class TargetSessionPreparationTest(unittest.TestCase):
         import live_rule_engine_coordinator as module
         snapshot = {
             'connection': {'burpConnected': True, 'burpVersion': 'Burp Suite Professional 2024.1.1.1'},
-            'server': {'extensionVersion': '1.5.0-dev.6', 'buildId': EXPECTED_BUILD_ID, 'serverState': 'running',
+            'server': {'extensionVersion': module.EXPECTED_EXTENSION_VERSION, 'buildId': EXPECTED_BUILD_ID, 'serverState': 'running',
                        'bearerAuthenticationRequired': True, 'readOnlyMode': False, 'authorizedTargetCount': 1},
             'interception': {'enabled': False, 'editsEnabled': True, 'unattendedMode': {'active': False},
                              'pendingRequests': 0, 'pendingResponses': 0},
@@ -139,9 +139,21 @@ class TargetSessionPreparationTest(unittest.TestCase):
         }
         client = Mock()
         client.rpc.return_value = {'tools': [{'name': f'tool-{i}'} for i in range(89)]}
-        client.tool.side_effect = lambda name, **kwargs: {'checks': [{'url': TARGET_SESSION_URL, 'eligible': True}]} if name == 'burp_get_scope' else []
+        client.tool.side_effect = lambda name, **kwargs: {'checks': [{'url': u, 'eligible': True} for u in (TARGET_SESSION_URL, module.BROWSER_DEMO_URL)]} if name == 'burp_get_scope' else []
         with patch.object(LiveRuleEngineCoordinator, '_snapshot', return_value=snapshot), patch.object(module.preflight, 'check_proxy_listener'):
             self.assertEqual(target_session_preflight(client)['state'], 'PASS')
+            snapshot['server']['extensionVersion'] = '1.5.0-dev.6'
+            with self.assertRaises(CoordinatorError):
+                target_session_preflight(client)
+            snapshot['server']['extensionVersion'] = module.EXPECTED_EXTENSION_VERSION
+            snapshot['server']['buildId'] = '20261107.3-scanner-permission-hardening-dev'
+            with self.assertRaises(CoordinatorError):
+                target_session_preflight(client)
+            snapshot['server']['buildId'] = EXPECTED_BUILD_ID
+            client.tool.side_effect = lambda name, **kwargs: {'checks': [{'url': TARGET_SESSION_URL, 'eligible': True}]} if name == 'burp_get_scope' else []
+            with self.assertRaises(CoordinatorError):
+                target_session_preflight(client)
+            client.tool.side_effect = lambda name, **kwargs: {'checks': [{'url': u, 'eligible': True} for u in (TARGET_SESSION_URL, module.BROWSER_DEMO_URL)]} if name == 'burp_get_scope' else []
             snapshot['interception']['unattendedMode']['active'] = True
             with self.assertRaises(CoordinatorError):
                 target_session_preflight(client)

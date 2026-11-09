@@ -98,6 +98,51 @@ class TargetLiveSessionTest {
     }
     private fun execute(req: HttpRequest, id: Int = 1) = live.processTargetMessage("request", HeldMessage(req, req), id)
 
+    @Test fun `revised browser form target supports separately approved one budget rule pair`() = runBlocking<Unit> {
+        val url = "http://127.0.0.1:8000/test-form-browser-validation"
+        config.autoApproveTargets = "127.0.0.1:8000"
+        val grant = live.requestTargetRuleAuthorization(listOf(url), 300)
+        val requestRule = live.createInterceptionRule(InterceptionRuleSpec("Browser form", url, grant.id,
+            RuleDirection.REQUEST, conditions = RuleMatchConditions(method = "POST", contentType = "application/x-www-form-urlencoded",
+                formFieldName = "mcp_test", formFieldValue = "original"),
+            transformations = listOf(RuleTransformation(RuleTransformType.SET_FORM_FIELD, name = "mcp_test", value = "modified")),
+            maximumMatches = 1, maximumModifications = 1))
+        val responseRule = live.createInterceptionRule(InterceptionRuleSpec("Browser response", url, grant.id,
+            RuleDirection.RESPONSE, conditions = RuleMatchConditions(method = "POST", responseStatus = 200, contentType = "application/json"),
+            transformations = listOf(RuleTransformation(RuleTransformType.SET_JSON_FIELD, path = "$.browser_verified", valueJson = "true")),
+            maximumMatches = 1, maximumModifications = 1))
+        assertEquals(InterceptionRuleState.DISABLED, requestRule.state)
+        assertEquals(InterceptionRuleState.DISABLED, responseRule.state)
+        live.startTargetRuleSession(grant.id, listOf(requestRule.id, responseRule.id), 60)
+        val req = request(url, "name=test&mcp_test=original", listOf("Host" to "127.0.0.1:8000", "Content-Type" to "application/x-www-form-urlencoded"))
+        val sent = execute(req)
+        assertEquals("name=test&mcp_test=modified", String(sent.message.body().getBytes()))
+        val originalResponse = response(sent.request, "{\"serverVerified\":true}")
+        val body = String(live.processTargetMessage("response", HeldMessage(originalResponse, sent.request), 1).message.body().getBytes())
+        assertTrue(body.contains("\"serverVerified\":true"), body)
+        assertTrue(body.contains("\"browser_verified\":true"), body)
+        for (id in listOf(requestRule.id, responseRule.id)) {
+            assertEquals(1, live.ruleEngine.get(id).stats.modified)
+            assertEquals(0, live.ruleEngine.get(id).stats.remainingMatches)
+        }
+        val sibling = request("${url}-unrelated", "name=test&mcp_test=original", listOf("Host" to "127.0.0.1:8000", "Content-Type" to "application/x-www-form-urlencoded"))
+        assertSame(sibling, execute(sibling, 2).message)
+    }
+
+    private fun startSeparateRules(matches: Int = 1, modifications: Int = matches): Pair<String, String> = runBlocking {
+        val grant = live.requestTargetRuleAuthorization(listOf(target), 300)
+        val requestRule = live.createInterceptionRule(InterceptionRuleSpec("One request", target, grant.id,
+            RuleDirection.REQUEST, conditions = RuleMatchConditions(method = "POST", contentType = "application/json"),
+            transformations = listOf(RuleTransformation(RuleTransformType.SET_JSON_FIELD, path = "$.enabled", valueJson = "true")),
+            maximumMatches = matches, maximumModifications = modifications))
+        val responseRule = live.createInterceptionRule(InterceptionRuleSpec("One response", target, grant.id,
+            RuleDirection.RESPONSE, conditions = RuleMatchConditions(method = "POST", responseStatus = 200, contentType = "application/json"),
+            transformations = listOf(RuleTransformation(RuleTransformType.SET_JSON_FIELD, path = "$.browser_verified", valueJson = "true")),
+            maximumMatches = matches, maximumModifications = modifications))
+        live.startTargetRuleSession(grant.id, listOf(requestRule.id, responseRule.id), 60)
+        requestRule.id to responseRule.id
+    }
+
     @Test fun `safe query variants stay on the approved path while credential keys remain unchanged`() {
         start()
         val safe = request("$target?x=one&x=&keep=%E9%9B%AA")
@@ -119,6 +164,43 @@ class TargetLiveSessionTest {
         }
     }
 
+    @Test fun `broad Burp scope never extends an exact session to prefix siblings`() {
+        // setup deliberately reports every URL in scope: scope is an eligibility gate,
+        // not the exact execution authority supplied by the grant and rule binding.
+        val id = start()
+        for (url in listOf("$target-unrelated", "${target}yrinth", "$target/child")) {
+            val req = request(url)
+            assertSame(req, execute(req).message, url)
+            val res = response(req)
+            assertSame(res, live.processTargetMessage("response", HeldMessage(res, req), 1).message, url)
+        }
+        assertEquals(0, live.ruleEngine.get(id).stats.modified)
+        assertTrue(String(execute(request()).message.body().getBytes()).contains("true"))
+        assertTrue(live.queue.list("request").isEmpty())
+        assertTrue(live.queue.list("response").isEmpty())
+    }
+
+    @Test fun `reserved localhost form path cannot use a preparation grant instead of unattended authority`() = runBlocking<Unit> {
+        config.autoApproveTargets = "127.0.0.1:8000"
+        val formTarget = "http://127.0.0.1:8000/test-form"
+        val grant = live.requestTargetRuleAuthorization(listOf(formTarget), 300)
+        val spec = InterceptionRuleSpec("Prepared browser form", formTarget, grant.id, RuleDirection.REQUEST,
+            conditions = RuleMatchConditions(method = "POST", contentType = "application/x-www-form-urlencoded",
+                formFieldName = "mcp_test", formFieldValue = "original"),
+            transformations = listOf(RuleTransformation(RuleTransformType.SET_FORM_FIELD, name = "mcp_test", value = "modified")),
+            maximumMatches = 1, maximumModifications = 1)
+        assertThrows(IllegalStateException::class.java) { live.createInterceptionRule(spec) }
+        // Even a low-level prepared rule cannot bypass the target-session boundary.
+        val rule = live.ruleEngine.create(spec)
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { live.startTargetRuleSession(grant.id, listOf(rule.id), 60) }
+        }
+        assertFalse(live.enabled)
+        assertFalse(live.unattendedSnapshot().active)
+        assertEquals(InterceptionRuleState.DISABLED, live.ruleEngine.get(rule.id).state)
+        coVerify(exactly = 1) { Dialogs.requestOption(any(), any(), any(), any(), any(), any()) }
+    }
+
     @Test fun `approved request and associated response transformations execute without a manual queue`() {
         val id = start()
         val req = request()
@@ -130,6 +212,80 @@ class TargetLiveSessionTest {
         assertEquals(2, live.ruleEngine.get(id).stats.modified)
         assertTrue(live.queue.list("request").isEmpty()); assertTrue(live.queue.list("response").isEmpty())
         coVerify(exactly = 2) { Dialogs.requestOption(any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test fun `separate one match request and response rules preserve origin verification`() {
+        val (requestId, responseId) = startSeparateRules()
+        val sent = execute(request())
+        assertTrue(String(sent.message.body().getBytes()).contains("\"enabled\":true"))
+        val original = response(sent.request, "{\"serverVerified\":true}")
+        val received = live.processTargetMessage("response", HeldMessage(original, sent.request), 1)
+        val body = String(received.message.body().getBytes())
+        assertTrue(body.contains("\"serverVerified\":true"), body)
+        assertTrue(body.contains("\"browser_verified\":true"), body)
+        for (id in listOf(requestId, responseId)) {
+            val stats = live.ruleEngine.get(id).stats
+            assertEquals(1, stats.modified)
+            assertEquals(1, stats.forwarded)
+            assertEquals(0, stats.remainingMatches)
+            assertEquals(0, stats.remainingModifications)
+        }
+        assertSame(original, live.processTargetMessage("response", HeldMessage(original, sent.request), 1).message)
+    }
+
+    @Test fun `separate rules transform repeated pairs through the last permitted match only`() {
+        val ids = startSeparateRules(matches = 2)
+        for (pair in 1..2) {
+            val sent = execute(request(), pair)
+            assertTrue(String(sent.message.body().getBytes()).contains("\"enabled\":true"))
+            val res = response(sent.request, "{\"serverVerified\":true}")
+            val result = live.processTargetMessage("response", HeldMessage(res, sent.request), pair)
+            assertTrue(String(result.message.body().getBytes()).contains("\"browser_verified\":true"))
+        }
+        val overBudget = request()
+        assertSame(overBudget, execute(overBudget, 3).message)
+        val res = response(overBudget, "{\"serverVerified\":true}")
+        assertSame(res, live.processTargetMessage("response", HeldMessage(res, overBudget), 3).message)
+        for (id in listOf(ids.first, ids.second)) {
+            assertEquals(2, live.ruleEngine.get(id).stats.modified)
+            assertEquals(2, live.ruleEngine.get(id).stats.forwarded)
+        }
+    }
+
+    @Test fun `modification budget exhaustion preserves the paired response without restoring budgets`() {
+        val ids = startSeparateRules(matches = 2, modifications = 1)
+        val sent = execute(request())
+        assertEquals(InterceptionRuleState.MAX_MODIFICATIONS, live.ruleEngine.get(ids.first).state)
+        val res = response(sent.request, "{\"serverVerified\":true}")
+        val result = live.processTargetMessage("response", HeldMessage(res, sent.request), 1)
+        assertTrue(String(result.message.body().getBytes()).contains("\"browser_verified\":true"))
+        val another = request()
+        assertSame(another, execute(another, 2).message)
+        assertEquals(0, live.ruleEngine.get(ids.first).stats.remainingModifications)
+        assertEquals(1, live.ruleEngine.get(ids.first).stats.modified)
+    }
+
+    @Test fun `paused or deleted exhausted request rules still invalidate response association`() {
+        for (delete in listOf(false, true)) {
+            val ids = startSeparateRules()
+            val sent = execute(request())
+            if (delete) live.deleteInterceptionRule(ids.first) else live.disableInterceptionRule(ids.first)
+            val res = response(sent.request, "{\"serverVerified\":true}")
+            assertSame(res, live.processTargetMessage("response", HeldMessage(res, sent.request), 1).message)
+            assertEquals(0, live.ruleEngine.get(ids.second).stats.modified)
+            live.disable()
+        }
+    }
+
+    @Test fun `request rule pause and resume during response materialization invalidates final release`() {
+        val ids = startSeparateRules(matches = 2)
+        val sent = execute(request())
+        val res = response(sent.request, "{\"serverVerified\":true}", onEdit = {
+            live.disableInterceptionRule(ids.first)
+            live.enableInterceptionRule(ids.first)
+        })
+        assertSame(res, live.processTargetMessage("response", HeldMessage(res, sent.request), 1).message)
+        assertEquals(0, live.ruleEngine.get(ids.second).stats.modified)
     }
 
     @Test fun `canonical default port works but wrong scheme host port path service or Host does not`() {

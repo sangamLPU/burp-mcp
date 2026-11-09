@@ -1,8 +1,9 @@
 # Burp MCP agent setup and operation
 
 This runbook supports a fresh Windows restart or private clone without relying
-on a previous chat. Development is paused at **1.5.0-dev.6**, build
-**20261107.3-scanner-permission-hardening-dev**. Features are frozen. Read
+on a previous chat. The corrected development artifact is **1.5.0-dev.7**, build
+**20261109.1-rule-association-fix-dev**; the running extension may still be dev.6.
+Features are frozen. Read
 [development status](DEVELOPMENT_STATUS.md) before taking action. No command or
 plan below authorizes application traffic or a supervised test.
 
@@ -39,7 +40,7 @@ python --version
 .\gradlew.bat -PdevelopmentBuild=true --no-configuration-cache test shadowJar --console=plain
 ```
 
-Output: `build\dev-v1.5.0\libs\burp-mcp-1.5.0-dev.6-all.jar`. Preserve an existing
+Output: `build\dev-v1.5.0\libs\burp-mcp-1.5.0-dev.7-all.jar`. Preserve an existing
 same-version artifact before rebuilding: packaging includes build metadata, so a
 fresh build need not have the recorded binary hash. Do not use `build.ps1`,
 default-output `clean`, or default-output packaging against the preserved release
@@ -52,6 +53,17 @@ It is ignored and is not supplied by a source clone. Verify locally:
 ```powershell
 Get-FileHash -Algorithm SHA256 -LiteralPath '.\build\dev-v1.5.0\libs\burp-mcp-1.5.0-dev.6-all.jar'
 ```
+
+The prepared dev.7 JAR is `D:\Projects\MCP\build\dev-v1.5.0\libs\burp-mcp-1.5.0-dev.7-all.jar`,
+SHA-256 `c2a0acb4d6e149c6df1056e5287fe3335583ac291f38c138a436cf649f46a26e`.
+It has passed packaging and synthetic tests and was observed loaded on 9 November
+2026; it has not been live traffic tested. Recheck current runtime before use.
+The human replaces only the loaded dev.6 extension after checking no grants, rules,
+sessions or held messages; do not close the Temporary Project. Select the dev.6
+entry in Extensions > Installed, uncheck Loaded, then Add the dev.7 Java JAR and
+verify one loaded MCP entry. If a prompt or state is unexpected, stop for review.
+Reconfirm project/security/scope/allowlist/listener, authenticated discovery and
+empty authority after reload. Never overwrite either existing JAR.
 
 For fast checks against that already matching JAR, without repackaging:
 
@@ -125,11 +137,21 @@ native Proxy Intercept OFF separately. Keep the existing Proxy listener on 8080.
 Inspect the human-selected project and actual native security settings separately;
 the API cannot establish every UI setting or identify the project on this API baseline.
 
+Read-only mode and live-edit permission are independent. The exact local control is
+**Burp MCP > Live Interception > Allow AI edit proposals**. It also gates automatic
+modification rules, initializes false in a fresh extension instance, and has no MCP
+setter. Enable it only after explicit human approval; leave managed interception
+and unattended mode off during preflight. Current recovery, browser routing,
+native inspection and the manual-browser fallback are documented in
+[browser/Burp workflow](BROWSER_BURP_WORKFLOW.md).
+
 The original basic-mode HTTP scope prefixes on `127.0.0.1:8000` are:
 `/test-html`, `/test-post`, `/test-form`, `/test-upload`, `/test-cancel`,
 `/test-timeout`, `/test-session-expiry`, `/test-concurrent-a`, `/test-concurrent-b`.
 Each is enabled with subdomains disabled. The sole MCP host entry is
-`127.0.0.1:8000`. Root and unrelated paths must remain excluded. Do not expand
+`127.0.0.1:8000`. Root and unrelated paths outside those prefixes must remain excluded.
+These are prefix rules: `/test-post-phase2` and `/test-post-unrelated` inherit
+`/test-post`; this is not exact execution authority. Do not expand
 scope, add duplicates or overwrite unrelated settings. A fresh project needs
 separately reviewed human configuration; source checkout does not restore it.
 
@@ -141,6 +163,8 @@ python -B scripts/live_rule_engine_coordinator.py --target-preflight-only
 
 It performs authenticated MCP/static eligibility checks and a Proxy TCP availability
 check; it does not start a fixture, grant, rule, session, scan or application request.
+It checks both `/test-post-phase2` and `/test-form-browser-validation` explicitly;
+the latter remains eligible under the existing `/test-form` prefix.
 It expects write mode/live edits configured for the later test but does not enable
 them. A failure is a blocker, not permission to change settings. Native Proxy state
 and project identity still require separate observation. **Never invoke this
@@ -148,6 +172,13 @@ coordinator without the flag as a preflight:** its no-argument runner sends the
 legacy nine-exchange workflow.
 
 ## Authorized rules and fixture operation
+
+The original nine localhost test paths are reserved to the legacy unattended
+workflow: `createInterceptionRule` requires its local run authority for them and
+`startTargetRuleSession` excludes them. A preparation grant cannot authorize
+`/test-form` through the target-session path. The historical disabled browser form
+demo therefore needs a revised reviewed plan; do not enable unattended mode or
+weaken this dispatch to execute it. See [browser/Burp workflow](BROWSER_BURP_WORKFLOW.md).
 
 Read [target authorization](V1_5_0_TARGET_AUTHORIZATION.md),
 [rule engine](INTERCEPTION_RULE_ENGINE.md), and

@@ -164,6 +164,14 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig, priva
     private fun targetFingerprint(request: HttpRequest): String = java.security.MessageDigest.getInstance("SHA-256")
         .digest(request.toByteArray().getBytes()).joinToString("") { "%02x".format(it) }
 
+    // Budget exhaustion stops evaluation, but does not change the approved revision
+    // of an already forwarded request. Keep it in the association identity until
+    // pause/delete/expiry/revocation invalidates that identity. The evaluator still
+    // selects ACTIVE rules only and enforces every consumed budget.
+    private fun targetAssociationState(state: InterceptionRuleState): Boolean =
+        state == InterceptionRuleState.ACTIVE || state == InterceptionRuleState.MAX_MATCHES ||
+            state == InterceptionRuleState.MAX_MODIFICATIONS
+
     /** Bounded automatic path: no manual queue, network I/O, disclosure, drop or wait. */
     internal fun processTargetMessage(kind: String, original: HeldMessage, messageId: Int): HeldMessage {
         if (!targetSlots.tryAcquire()) return original
@@ -181,15 +189,16 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig, priva
                 targetFingerprint(original.message.initiatingRequest()) != fingerprint) return original
             val snapshot = synchronized(this) {
                 val session = currentSessionId ?: return original
-                val specs = ruleEngine.list().filter { it.state == InterceptionRuleState.ACTIVE && it.spec.targetUrl == target && targetExecutionEligible(it.id, it.spec) }
+                val specs = ruleEngine.list().filter { targetAssociationState(it.state) && it.spec.targetUrl == target && targetExecutionEligible(it.id, it.spec) }
                     .associate { it.id to it.spec }
                 if (specs.isEmpty()) return original
+                val revisions = specs.mapValues { ruleEngine.authorizationRevision(it.key) }
                 if (kind == "response") {
                     val associated = targetAssociations.remove(messageId) ?: return original
                     if (associated.session != session || associated.target != target || associated.fingerprint != fingerprint ||
-                        associated.revisions != specs.mapValues { ruleEngine.authorizationRevision(it.key) }) return original
+                        associated.revisions != revisions) return original
                 }
-                session to specs
+                Triple(session, specs, revisions)
             }
             val input = toRuleHttpMessage(kind, original, "target-$messageId") ?: return original
             val evaluation = ruleEngine.evaluate(input)
@@ -198,9 +207,10 @@ class LiveInterception(private val api: MontoyaApi, val config: McpConfig, priva
                 check(exactTarget(output.request) == target && !hasSensitiveContent(output.request, output.message))
                 check(output.message.toByteArray().length() <= InterceptionRuleEngine.MAX_MESSAGE_BYTES)
                 check(currentSessionId == snapshot.first && snapshot.second.all { (id, spec) ->
-                    targetExecutionEligible(id, spec) && ruleEngine.get(id).let { it.state == InterceptionRuleState.ACTIVE && it.spec == spec }
+                    targetExecutionEligible(id, spec) && ruleEngine.get(id).let { targetAssociationState(it.state) && it.spec == spec } &&
+                        ruleEngine.authorizationRevision(id) == snapshot.third[id]
                 }) { "Target authorization changed" }
-                val releaseRevisions = snapshot.second.mapValues { ruleEngine.authorizationRevision(it.key) }
+                val releaseRevisions = snapshot.third
                 return targetRuleAuthorizations.commit(snapshot.second, snapshot.first) {
                     check(targetSessionHealthy() && currentSessionId == snapshot.first)
                     if (kind == "request") {

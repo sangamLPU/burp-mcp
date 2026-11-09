@@ -1,6 +1,12 @@
 # AI-agent interception rule examples
 
-These examples use only the current predefined localhost test paths. The extension does not currently authorize automatic rules on arbitrary websites. An agent must not infer permission for a different host from these examples.
+These examples describe the legacy predefined localhost unattended workflow.
+They do not authorize arbitrary websites or supply authority for target sessions.
+For the current exact-path, two-native-approval target workflow, natural-language
+mapping, browser setup and limits, use [browser/Burp workflow](BROWSER_BURP_WORKFLOW.md).
+The original nine localhost rule targets cannot substitute a target preparation
+grant for unattended authority. Target sessions reject DROP and leave unsupported
+traffic unchanged; the legacy queue/drop behavior below is a separate mode.
 
 ## Change a JSON field in every matching request
 
